@@ -2,6 +2,118 @@
 
 This plan reconciles the earlier notes and terminal-friendly checklist into one canonical roadmap. Each stage lists the key objectives, files, and definition of done so we can track progress and keep tooling decisions consistent. Completed work is noted where applicable.
 
+
+Below is a drop‑in section you can paste **at the very top** of your planning document. It explains what “HRM‑inspired” means here and how it’s realized in this repo.
+
+---
+
+# What “HRM‑Inspired” Means in This Repo
+
+**Purpose.** The original Hierarchical Reasoning Model (HRM) shows that *iterative latent computation*—short bursts of internal reasoning with an option to “halt” early—can substitute for brittle, token‑level step‑by‑step chains. ARC Prize’s ablation study further found that **the outer refinement loop and training with multiple refinement steps** were the main contributors to HRM’s gains, while the explicit two‑timescale H/L hierarchy added little over a comparable transformer.
+
+**Our adaptation for chess.** We keep the parts that clearly help and fit the domain:
+
+* ✅ **Iterative refinement (outer loop).** The model predicts a policy/value, then **feeds its own policy back in** as context and refines for a few steps.
+* ✅ **Deep supervision with detach.** We compute a loss **at each refinement step** and **detach** the previous step’s outputs to avoid full BPTT—mirroring HRM’s 1‑step/segment training effect.
+* ✅ **Adaptive halting (ACT).** A small “halt/continue” head decides whether more refinement is worth it; at inference we can early‑stop or enforce a small minimum.
+* ✅ **Inference‑time scaling.** Harder positions can get more refinement steps; easy ones can stop quickly.
+* ✅ **Augmentations.** Like HRM’s task augs, we use chess‑safe symmetries (mirror, rotate180+color‑swap) and label tricks (e.g., temperature jitter) to strengthen generalization.
+
+We **do not** include a puzzle/position‑ID embedding (which ARC found to drive memorization) and we start with a **single transformer stack** rather than separate H/L modules. A two‑timescale variant is left as an optional extension once the baseline is stable.
+
+---
+
+## Minimal Mental Model
+
+Each **refinement step** $k$ takes the board features and the **previous step’s policy** and returns a refined (policy, value) and a **halt** score:
+
+```
+(board_planes, prev_policy_k-1) ──> Transformer ──> policy_k, value_k, halt_k
+                                          ↑
+                                   (used next step)
+```
+
+Training runs **K\_train** steps (e.g., 8–16), with a loss at each step and **detach** between steps:
+
+1. Step k: compute losses (policy CE, value MSE, small ACT BCE)
+2. Detach the softmax(policy\_k) → becomes prev\_policy\_k for the next step
+3. Average losses over steps and update
+
+Inference runs 1–4 steps with ACT/entropy to early‑stop.
+
+---
+
+## Where Each Concept Lives (File Map)
+
+* **Outer refinement step**
+  `chessref/model/refiner.py`
+
+  * `IterativeRefiner.forward_step(...)` embeds the board, fuses `prev_policy`, runs a **Transformer encoder stack**, and returns `(policy_logits, value, halt_logits, state)`.
+
+* **Deep supervision (detach between steps)**
+  `chessref/train/train_supervised.py`
+
+  * The training loop calls `forward_step` **K\_train** times; after each step it **detaches** the softmaxed policy before feeding it into the next step.
+
+* **Policy/value losses + masking**
+  `chessref/model/loss.py`
+
+  * `policy_ce` applies the **legal‑move mask** (−∞ on illegal indices) before softmax.
+
+* **ACT halting**
+  `chessref/model/refiner.py` (head) and `chessref/model/loss.py` (targets)
+
+  * Small BCE term encourages correct halting; can be disabled or replaced by entropy thresholds.
+
+* **Inference‑time scaling / early stop**
+  `chessref/inference/predict.py`
+
+  * `refine_predict(..., max_loops, min_loops, entropy_stop, use_act)`.
+
+* **Chess‑safe augmentations**
+  `chessref/data/augment.py` with tests in `tests/test_augment.py`.
+
+* **Legal move masking & indexing (AlphaZero 8×8×73)**
+  `chessref/moves/encoding.py`, `chessref/moves/legal_mask.py` with tests in `tests/test_encoding.py`, `tests/test_masks.py`.
+
+* **Teacher targets (MultiPV/MCTS) and dataset**
+  `chessref/data/engine_targets.py`, `chessref/data/dataset.py`.
+
+* **Evaluation & Ablations**
+  `chessref/eval/eval_policy.py`, `chessref/eval/eval_match.py`, optional `chessref/eval/ablations.py`.
+
+---
+
+## Why This Design (vs. “full” HRM)
+
+* **Keeps the winners.** ARC’s evaluation showed the **outer loop** and **training with multiple refinement steps** drove most of the gains. We center the codebase on those.
+* **Avoids non‑generalizing shortcuts.** No position IDs or task‑specific embeddings that would leak identity.
+* **Simple, extensible core.** Start with a single encoder stack. If later ablations justify it, you can introduce a **two‑timescale variant** by adding a slower “planner” block that updates every N steps while a faster block updates each step (see “Optional extensions” below).
+
+---
+
+## Defaults & Knobs (config‑friendly)
+
+* `K_train` (training refinement steps): **8** (good starting point; 16 if you have VRAM/time).
+* `max_loops` (inference): **1–4** (allocate more on “hard” positions).
+* `act_weight`: **0.1** (start at 0, warm in after a few epochs).
+* `d_model/depth/heads`: baseline \~30–35M params (e.g., 512/8/8).
+* Augmentations: **mirror** + **rotate180+color‑swap** always on; add **label smoothing** and **temperature jitter** for teacher policies.
+
+---
+
+## Success Criteria (what to watch)
+
+* **Refinement helps at train‑time:** `K_train=8` beats `K_train=1` on **held‑out CE/top‑1** even when inference uses a **single** step.
+* **Early‑stop saves compute:** ACT or entropy reduces average steps with negligible strength loss.
+* **Entropy drops across steps:** policy entropy curves decrease from step 1 → step K for hard positions.
+
+---
+
+This section is the conceptual anchor for the repo: **an iterative chess policy/value model that “thinks a bit in latent space,” learns when to stop, and plays stronger without relying on textual chains or identity hacks.**
+
+
+
 ---
 
 ## Stage 0 · Repository Bootstrap *(completed)*
@@ -34,13 +146,14 @@ This plan reconciles the earlier notes and terminal-friendly checklist into one 
 
 ---
 
-## Stage 3 · Board Encoding & Augmentations
-- **Files:** `chessref/data/planes.py`, `chessref/data/augment.py`, `tests/test_augment.py`.
+## Stage 3 · Board Encoding & Augmentations *(completed)*
+- **Files:** `chessref/data/planes.py`, `chessref/data/augment.py`, `tests/test_planes.py`, `tests/test_augment.py`.
 - **Actions:**
   - Implement board-to-plane tensor conversion consistent with the model input shape.
-  - Add symmetry-safe augmentations (rotations, reflections) preserving castling rights and en-passant targets.
-  - Unit-test invertibility of augmentations and promotion legality after transforms.
-- **DoD:** conversion and augmentation utilities round-trip sample positions; corresponding tests pass.
+  - Add symmetry-safe augmentations (currently horizontal reflection; extend with additional symmetries once legality mapping is proven robust) preserving castling rights and en-passant targets.
+  - Unit-test tensor features, promotion, and en-passant handling after transforms.
+- **DoD:** `python3 -m pytest tests/test_planes.py tests/test_augment.py` passes.
+- ✅ Implemented board plane encoder and horizontal mirror augmentation with coverage for promotions and en-passant remapping.
 
 ---
 
