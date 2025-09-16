@@ -260,13 +260,14 @@ ARC Prize independently re‑ran HRM on their **Semi‑Private** hold‑out sets
 
 ---
 
-## Stage 4 · Data Extraction & Teacher Targets
-- **Files:** `chessref/data/pgn_extract.py`, `chessref/data/engine_targets.py`, `configs/data.yaml`.
+## Stage 4 · Data Extraction & Teacher Targets *(completed)*
+- **Files:** `chessref/data/pgn_extract.py`, `chessref/data/engine_targets.py`, `configs/data.yaml`, `tests/test_pgn_extract.py`, `tests/test_engine_targets.py`.
 - **Actions:**
   - Parse PGNs (or other sources) into `(planes, move, result)` records.
-  - Generate teacher policy/value targets via Stockfish (MultiPV) or cached evaluations.
-  - Expose data paths, augmentation toggles, and caching options through Hydra configs.
+  - Generate teacher policy/value targets via Stockfish (MultiPV) **or** self-play one-hot targets so the system can bootstrap without an external engine.
+  - Expose data paths, augmentation toggles, and target generator parameters through Hydra configs.
 - **DoD:** running the extraction pipeline over a small PGN sample yields tensors and teacher distributions that sum to 1 over legal moves.
+- ✅ Implemented PGN extraction, self-play/Stockfish target generators, config scaffolding, and unit tests covering one-hot policies from game records.
 
 ---
 
