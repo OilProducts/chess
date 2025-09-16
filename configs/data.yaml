@@ -1,14 +1,14 @@
-# Hydra configuration for data extraction and teacher targets.
+# Default data extraction configuration (aligned with dataset pipeline).
 pgn_paths: []
 max_games: null
-output_dir: data/processed
-augmentations:
-  enable: true
-  transforms: [identity, flip_horizontal]
+transforms: [identity, flip_horizontal]
 target:
-  type: selfplay  # or "stockfish"
+  type: selfplay
   stockfish_path: null
-  depth: 12
+  depth: null
   nodes: null
   multipv: 8
   temperature: 1.0
+shuffle: true
+num_workers: 0
+pin_memory: false

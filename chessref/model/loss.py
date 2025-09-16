@@ -44,6 +44,8 @@ def policy_cross_entropy(
     if legal_mask is not None:
         logits = logits.masked_fill(~legal_mask, float("-inf"))
     log_probs = F.log_softmax(logits, dim=-1)
+    if legal_mask is not None:
+        log_probs = torch.where(legal_mask, log_probs, torch.zeros_like(log_probs))
     loss = -(target * log_probs).sum(dim=-1)
     return loss.mean()
 
