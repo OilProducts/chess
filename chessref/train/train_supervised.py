@@ -22,6 +22,8 @@ from chessref.data.dataset import (
 from chessref.model.loss import LossConfig, compute_refiner_loss
 from chessref.model.refiner import IterativeRefiner
 from chessref.moves.legal_mask import legal_move_mask
+from chessref.utils.checkpoint import save_checkpoint
+from chessref.utils.logging import LoggingConfig, TrainLogger
 
 
 @dataclass
@@ -80,6 +82,7 @@ class TrainConfig:
     optim: OptimConfig
     training: TrainingConfig
     checkpoint: CheckpointConfig = field(default_factory=CheckpointConfig)
+    logging: LoggingConfig = field(default_factory=LoggingConfig)
 
 
 @dataclass
@@ -106,7 +109,15 @@ def _load_config(path: Path) -> TrainConfig:
     optim = OptimConfig(**OmegaConf.to_object(cfg.optim))
     training = TrainingConfig(**OmegaConf.to_object(cfg.training))
     checkpoint = CheckpointConfig(**OmegaConf.to_object(cfg.get("checkpoint", {})))
-    return TrainConfig(model=model, data=data, optim=optim, training=training, checkpoint=checkpoint)
+    logging = LoggingConfig(**OmegaConf.to_object(cfg.get("logging", {})))
+    return TrainConfig(
+        model=model,
+        data=data,
+        optim=optim,
+        training=training,
+        checkpoint=checkpoint,
+        logging=logging,
+    )
 
 
 def _prepare_dataloader(cfg: TrainConfig) -> DataLoader:
@@ -156,17 +167,6 @@ def _prepare_optimizer(model: IterativeRefiner, cfg: TrainConfig) -> torch.optim
     return optimizer
 
 
-def _save_checkpoint(
-    checkpoint_dir: Path,
-    step: int,
-    model: IterativeRefiner,
-    optimizer: torch.optim.Optimizer,
-) -> None:
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    path = checkpoint_dir / f"step_{step}.pt"
-    torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict(), "step": step}, path)
-
-
 def train(cfg: TrainConfig) -> TrainSummary:
     device = _select_device(cfg.training.device)
     dataloader = _prepare_dataloader(cfg)
@@ -174,6 +174,7 @@ def train(cfg: TrainConfig) -> TrainSummary:
     optimizer = _prepare_optimizer(model, cfg)
     use_amp = cfg.optim.use_amp and device.type == "cuda"
     scaler = GradScaler(enabled=use_amp)
+    logger = TrainLogger(cfg.logging)
 
     loss_cfg = LossConfig(
         policy_weight=1.0,
@@ -258,16 +259,29 @@ def train(cfg: TrainConfig) -> TrainSummary:
             global_step += 1
 
             if cfg.training.log_interval and global_step % cfg.training.log_interval == 0:
+                metrics = {
+                    "train/loss": loss_outputs.total.item(),
+                    "train/policy_loss": loss_outputs.policy.item(),
+                    "train/value_loss": loss_outputs.value.item(),
+                }
                 print(
-                    f"epoch={epoch+1} step={global_step} loss={loss_outputs.total.item():.4f} "
-                    f"policy={loss_outputs.policy.item():.4f} value={loss_outputs.value.item():.4f}"
+                    f"epoch={epoch+1} step={global_step} loss={metrics['train/loss']:.4f} "
+                    f"policy={metrics['train/policy_loss']:.4f} value={metrics['train/value_loss']:.4f}"
                 )
+                if logger.enabled:
+                    logger.log_scalars(metrics, global_step)
+                    logger.flush()
 
             if (
                 cfg.checkpoint.save_interval
                 and global_step % cfg.checkpoint.save_interval == 0
             ):
-                _save_checkpoint(Path(cfg.checkpoint.directory), global_step, model, optimizer)
+                save_checkpoint(
+                    Path(cfg.checkpoint.directory) / f"step_{global_step}.pt",
+                    model_state=model.state_dict(),
+                    optimizer_state=optimizer.state_dict(),
+                    step=global_step,
+                )
 
         # Flush remaining gradients at epoch end.
         if accum_counter > 0:
@@ -275,6 +289,8 @@ def train(cfg: TrainConfig) -> TrainSummary:
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
             accum_counter = 0
+
+    logger.close()
 
     return TrainSummary(
         epochs_completed=cfg.training.epochs,
@@ -306,6 +322,7 @@ __all__ = [
     "OptimConfig",
     "TrainingConfig",
     "CheckpointConfig",
+    "LoggingConfig",
     "TrainConfig",
     "TrainSummary",
     "train",

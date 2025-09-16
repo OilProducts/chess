@@ -42,3 +42,7 @@ training:
 checkpoint:
   directory: checkpoints
   save_interval: 0
+
+logging:
+  enabled: false
+  log_dir: runs
