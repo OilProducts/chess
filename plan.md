@@ -112,6 +112,109 @@ Inference runs 1–4 steps with ACT/entropy to early‑stop.
 
 This section is the conceptual anchor for the repo: **an iterative chess policy/value model that “thinks a bit in latent space,” learns when to stop, and plays stronger without relying on textual chains or identity hacks.**
 
+# HRM in a Nutshell — and What We’re Implementing
+
+**Why HRM:**
+The Hierarchical Reasoning Model (HRM) was proposed to get *deeper algorithmic computation* than a fixed‑depth Transformer or brittle text‑based Chain‑of‑Thought (CoT). Instead of writing out reasoning as tokens, HRM “thinks” in its latent state over multiple short bursts, with a learned option to stop early.
+
+## The HRM model (original paper)
+
+* **Two recurrent modules at different timescales (H/L):**
+
+  * **L (fast worker):** runs for **T** micro‑steps inside a cycle, doing local computation/search under a fixed context.
+  * **H (slow planner):** updates **once per cycle** using L’s final state to change the context for the next cycle.
+  * This creates **hierarchical convergence**: L converges locally; H perturbs the context so L starts a new, meaningful trajectory. Effective compute ≈ **N×T** steps in one forward pass.
+
+* **Training without BPTT:**
+
+  * Uses a **1‑step implicit/DEQ‑style gradient**: backprop only through the final states of H and L (approximate $(I-J)^{-1}\approx I$).
+  * Adds **deep supervision across segments**: run multiple forward “segments”, compute a loss after each, **detach the state** before the next segment. This keeps memory **O(1)** in time and stabilizes learning.
+
+* **Adaptive halting (ACT):**
+
+  * A small head predicts **halt vs continue** so the model can spend more steps on hard cases and stop early on easy ones.
+  * **Inference‑time scaling:** you can raise the max steps at test time for extra strength.
+
+* **Reported results (paper):**
+
+  * With \~**27M** params and \~**1k** training examples per task (no pretraining / no CoT supervision), HRM reports strong results on **ARC‑AGI** puzzles and near‑perfect accuracy on hard **Sudoku** / **Maze** tasks (with larger Sudoku training).
+  * Key message: *latent* iterative reasoning + adaptive compute can rival/beat CoT‑heavy systems on algorithmic domains.
+
+## What the ARC Prize reproduction & ablations found
+
+ARC Prize independently re‑ran HRM on their **Semi‑Private** hold‑out sets and performed ablations. Their main conclusions:
+
+* **Verification:**
+
+  * **ARC‑AGI‑1:** \~**32%** (impressive for 27M params; lower than the paper’s public‑set score but far from collapsing).
+  * **ARC‑AGI‑2:** \~**2%** (shows some signal but not material progress on this harder suite).
+
+* **Key finding #1 — The architecture isn’t the magic:**
+
+  * Swapping HRM for a **same‑sized Transformer** while keeping the rest of the pipeline constant produced **similar** performance (within a few percentage points in many settings).
+  * Tweaking H/L iteration counts away from the default **hurt** performance.
+  * Takeaway: the explicit H/L hierarchy adds, at best, a **small** advantage vs a comparable backbone; it’s not the primary driver.
+
+* **Key finding #2 — The **outer refinement loop** is the main win:**
+
+  * Going from **1** outer loop (no refinement) to **2** loops (one refinement) yielded a **large jump** (e.g., +13pp on ARC public eval in their slice).
+  * Training with **many** refinement loops substantially improved quality **even if** inference used **few** loops; i.e., **train‑time refinement >> test‑time refinement**.
+  * ACT helped reduce average steps; performance with ACT was within a few points of using a fixed (larger) number of loops.
+
+* **Key finding #3 — Limited cross‑task transfer; heavy reliance on per‑task adaptation:**
+
+  * Training only on the **evaluation tasks’** demonstrations (no train‑set or ConceptARC tasks) still reached \~**31%** pass\@2 (vs \~41% reported in the paper’s public setting).
+  * Interpretation: much of the performance comes from **adapting to each task** via gradient steps on its demos (a transductive/test‑time training flavor), not from broad prior knowledge.
+
+* **Key finding #4 — Augmentations matter, but you don’t need 1k:**
+
+  * **\~300** augmentations achieved **near‑max** performance; even **\~30** got within a few points.
+  * **Training‑time** augmentation mattered more than large **inference‑time** augmentation/voting.
+
+* **Other technical notes:**
+
+  * The original pipeline used a **puzzle\_id embedding** (task/augmentation identity) that the model relied on; this constrains generalization and requires the inference items to have appeared (as IDs) during training.
+  * The method is **transductive** (predicts outputs directly) rather than inducing explicit programs; refinement steps can be visualized but the learned algorithm remains implicit.
+
+## What we keep vs skip in this repo (and why)
+
+**Keep (core drivers):**
+
+* **Iterative refinement outer loop** with **deep supervision + detach** between steps.
+* **Adaptive halting (ACT)** or a simple **entropy stop** to save compute.
+* **Inference‑time scaling:** allow more loops on hard positions.
+* **Augmentations:** chess‑safe symmetries (mirror, rotate180+color‑swap) and label tricks (e.g., teacher temperature jitter).
+
+**Skip or defer:**
+
+* **Puzzle/position IDs** (don’t generalize; we need open‑world positions).
+* The explicit **H/L two‑timescale split** (adds complexity; ablations show minimal gain over a well‑tuned single stack). We can prototype it later as an optional extension if our own ablations show consistent wins.
+
+## How this maps to the code you’re building
+
+* The repo centers on a **single Transformer encoder stack** wrapped by an **outer refinement loop**:
+
+  * Step $k$: `policy_k, value_k, halt_k = F(board, prev_policy_{k-1})`
+  * Compute losses at each step; **detach** `softmax(policy_k)` before feeding it to step $k+1$.
+  * Train with **K\_train=8–16** steps; infer with **1–4** plus ACT/entropy early‑stop.
+
+* This matches both the spirit of HRM (latent iterative computation + adaptive halting) **and** the ARC ablations (refinement is the lever; hierarchy is optional).
+
+* We’ll evaluate the same levers the ablation highlighted:
+
+  * **k\_train** sweep (1 vs 8/16),
+  * **max\_loops** at inference (1–4),
+  * **ACT on/off**,
+  * **augmentation on/off** and count.
+
+**Success criteria:**
+
+1. Training with **more** refinement steps beats training with **one** step even when inference uses a **single** step;
+2. ACT lowers average steps with negligible strength loss;
+3. Policy **entropy** and **CE vs teacher** improve across refinement steps, especially on hard positions.
+
+---
+
 
 
 ---
