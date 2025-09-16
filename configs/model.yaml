@@ -1,0 +1,14 @@
+# Default model hyperparameters
+num_moves: 4672
+model:
+  d_model: 512
+  nhead: 8
+  depth: 8
+  dim_feedforward: 2048
+  dropout: 0.1
+  use_act: true
+training:
+  k_train: 8
+  detach_prev_policy: true
+  act_weight: 0.1
+  value_loss: mse
