@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+*.pyo
+*.orig
+.ipynb_checkpoints/
+.pytest_cache/
+.idea/
+.DS_Store
+plan_raw*.md
