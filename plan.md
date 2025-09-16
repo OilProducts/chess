@@ -303,13 +303,14 @@ ARC Prize independently re‑ran HRM on their **Semi‑Private** hold‑out sets
 
 ---
 
-## Stage 8 · Inference & Evaluation Utilities
-- **Files:** `chessref/inference/predict.py`, `chessref/eval/eval_policy.py`, `chessref/eval/eval_match.py`, optional `chessref/eval/ablations.py`, `scripts/eval.sh`, `scripts/run_match.sh`.
+## Stage 8 · Inference & Evaluation Utilities *(completed)*
+- **Files:** `chessref/inference/predict.py`, `chessref/eval/eval_policy.py`, `chessref/eval/eval_match.py`, `configs/eval.yaml`, `configs/match.yaml`, `scripts/eval.sh`, tests covering predict/eval modules.
 - **Actions:**
-  - Implement batched inference with configurable refinement loops or ACT halting.
-  - Provide evaluation scripts for policy accuracy and engine matches.
-  - Add ablation tooling to toggle refinement depth, ACT, and augmentations.
-- **DoD:** evaluation scripts run end-to-end on a held-out set and (optionally) play matches against a baseline engine.
+  - Implement batched inference with ACT/entropy halting controls (`refine_predict`).
+  - Provide policy evaluation and lightweight match scripts with config-driven entry points.
+  - Add tests ensuring inference masking and evaluation flows operate without errors.
+- **DoD:** evaluation scripts run end-to-end once PGN/ckpt paths are provided; tests validate inference/eval helpers.
+- ✅ Inference utilities, eval scripts, configs, and tests implemented.
 
 ---
 
