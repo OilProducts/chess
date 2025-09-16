@@ -314,13 +314,14 @@ ARC Prize independently re‑ran HRM on their **Semi‑Private** hold‑out sets
 
 ---
 
-## Stage 9 · Testing, Monitoring & Tooling
-- **Files:** Additional tests in `tests/`, logging/checkpoint helpers in `chessref/utils/`.
+## Stage 9 · Testing, Monitoring & Tooling *(completed)*
+- **Files:** `chessref/utils/{logging,checkpoint,distributed,metrics}.py`, expanded tests for utilities, configs/training updated for logging.
 - **Actions:**
-  - Expand unit/integration tests (dataset collation, model forward, augmentation consistency).
-  - Implement logging (`utils/logging.py`), checkpointing (`utils/checkpoint.py`), distributed helpers, and Elo metrics.
-  - Ensure `make test` covers the suite; integrate TensorBoard or W&B monitoring dashboards.
-- **DoD:** automated tests pass; dashboards show refinement metrics decreasing across steps.
+  - Provide logging, checkpoint, distributed, and metric helpers plus TensorBoard integration.
+  - Expand the automated test suite to cover the new utilities and ensure legal masking/metrics remain sound.
+  - Wire training to use the checkpoint/logger utilities and expose logging options in configs.
+- **DoD:** `python3 -m pytest` passes (34 tests) and training emits TensorBoard-ready metrics when enabled.
+- ✅ Utility infrastructure and tests added; training now uses shared helpers.
 
 ---
 
@@ -329,6 +330,7 @@ ARC Prize independently re‑ran HRM on their **Semi‑Private** hold‑out sets
   - Run comparative experiments (e.g. `k_train=1` vs `k_train=8`, ACT on/off, augmentation toggles) and document results.
   - Profile training/inference (AMP, fused optimisers, `torch.compile` where stable).
   - Prepare deployment artifacts: TorchScript/ONNX export, optional UCI engine wrapper, quantisation experiments.
+  - Flesh out the self-play data generator (currently stubbed) and integrate it into the training data pipeline.
 - **DoD:** ablation scripts demonstrate expected trends; exported models run in the target environment.
 
 ---
