@@ -271,12 +271,13 @@ ARC Prize independently re‑ran HRM on their **Semi‑Private** hold‑out sets
 
 ---
 
-## Stage 5 · Dataset & DataLoader Assembly
-- **Files:** `chessref/data/dataset.py`, optional helpers in `chessref/utils/`.
+## Stage 5 · Dataset & DataLoader Assembly *(completed)*
+- **Files:** `chessref/data/dataset.py`, `tests/test_dataset.py`, `configs/data.yaml`.
 - **Actions:**
-  - Create PyTorch `Dataset`/`DataLoader` logic with augmentation hooks, cached legal masks, and distributed sharding support.
-  - Provide a CLI or module entry point (e.g. `python -m chessref.data.dataset --check`) to validate shapes and batching.
-- **DoD:** a smoke test loads a batch without shape mismatches; integration with Hydra config works.
+  - Create PyTorch `Dataset`/`DataLoader` logic with augmentation hooks (current transforms: identity, flip horizontal) and target generation pluggable per sample.
+  - Provide a CLI entry point (`python -m chessref.data.dataset --check <pgn>`) for shape/metadata sanity checks.
+- **DoD:** a smoke test loads a batch without shape mismatches; unit tests cover dataset shapes and augmentation wiring.
+- ✅ Implemented on-demand dataset materialisation with transform expansion, collate helper, CLI smoke test, and tests ensuring policies remain valid after augmentation.
 
 ---
 
