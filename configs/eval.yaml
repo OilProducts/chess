@@ -1,0 +1,36 @@
+model:
+  num_moves: 4672
+  d_model: 512
+  nhead: 8
+  depth: 8
+  dim_feedforward: 2048
+  dropout: 0.1
+  use_act: false
+
+data:
+  pgn_paths: []
+  max_games: 1
+  transforms: [identity]
+  target:
+    type: selfplay
+    stockfish_path: null
+    depth: null
+    nodes: null
+    multipv: 8
+    temperature: 1.0
+  shuffle: false
+  num_workers: 0
+  pin_memory: false
+
+inference:
+  max_loops: 4
+  min_loops: 1
+  use_act: false
+  entropy_threshold: null
+  act_threshold: 0.5
+
+runtime:
+  batch_size: 32
+  device: auto
+
+checkpoint: null
