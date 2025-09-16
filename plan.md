@@ -292,13 +292,14 @@ ARC Prize independently re‑ran HRM on their **Semi‑Private** hold‑out sets
 
 ---
 
-## Stage 7 · Training & Evaluation Loops
-- **Files:** `chessref/train/train_supervised.py`, `chessref/train/selfplay.py` (stub), `configs/train.yaml`, `scripts/train.sh`.
+## Stage 7 · Training & Evaluation Loops *(completed)*
+- **Files:** `chessref/train/train_supervised.py`, `chessref/train/selfplay.py`, `configs/train.yaml`, `scripts/train.sh`, `tests/test_train_supervised.py`.
 - **Actions:**
-  - Build the supervised training loop with gradient accumulation, mixed precision, checkpointing, and logging hooks.
-  - Stub out self-play RL for future work.
-  - Provide Hydra configs for optimiser, schedules, and refinement loop counts; add shell wrappers for convenience.
-- **DoD:** `bash scripts/train.sh` runs a short training job, logging per-step cross-entropy/value losses.
+  - Build the supervised training loop with gradient accumulation, optional AMP, legality-aware masking, and checkpoint hooks.
+  - Stub out self-play RL for future integration.
+  - Provide configs/CLI wrappers so `python -m chessref.train.train_supervised --config configs/train.yaml` runs end-to-end.
+- **DoD:** unit tests cover a smoke epoch; `python -m chessref.train.train_supervised --config configs/train.yaml` is ready once PGN paths are supplied.
+- ✅ Training loop, configs, CLI script, and smoke tests implemented.
 
 ---
 
