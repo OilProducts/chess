@@ -281,13 +281,14 @@ ARC Prize independently re‑ran HRM on their **Semi‑Private** hold‑out sets
 
 ---
 
-## Stage 6 · Refinement Model & Losses
-- **Files:** `chessref/model/refiner.py`, `chessref/model/loss.py`, `configs/model.yaml`.
+## Stage 6 · Refinement Model & Losses *(completed)*
+- **Files:** `chessref/model/refiner.py`, `chessref/model/loss.py`, `configs/model.yaml`, `tests/test_refiner.py`.
 - **Actions:**
-  - Implement the transformer backbone with iterative refinement steps, optional ACT halting head, and deep supervision (detach between steps).
+  - Implement the transformer backbone with iterative refinement steps, optional ACT halting head, and detach-by-default outer loop (`detach_prev_policy` toggle).
   - Define loss composition for policy/value/ACT terms with configurable weights.
-  - Expose model hyperparameters via config.
-- **DoD:** a forward pass on mock data returns per-step policies and values without runtime errors.
+  - Expose model hyperparameters via config and add unit tests covering forward shapes and loss backprop.
+- **DoD:** unit tests for refiner forward/loss pass; total loss backpropagates through policy/value/ACT paths.
+- ✅ Iterative refiner and loss utilities implemented; defaults wired via `configs/model.yaml`.
 
 ---
 
