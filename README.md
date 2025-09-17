@@ -65,6 +65,11 @@ python -m chessref.train.train_supervised --config configs/train.yaml \
   data.pgn_paths=[]
 ```
 
+Additional knobs (see `configs/selfplay.yaml`):
+- `max_datasets`: cap how many recent self-play batches to retain (older `.pt` files are deleted).
+- `train_every_batches`: run supervised training every N batches when `train_after=true`.
+- `run_forever`/`max_batches`: continuously generate batches until interrupted (useful for automation).
+
 ## Evaluation & Matches
 
 Policy accuracy and lightweight match play are available out-of-the-box:

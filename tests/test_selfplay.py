@@ -35,6 +35,10 @@ def test_generate_selfplay_games(tmp_path: Path) -> None:
         temperature=1.0,
         mcts_num_simulations=8,
         train_after=False,
+        max_datasets=None,
+        train_every_batches=1,
+        run_forever=False,
+        max_batches=None,
     )
 
     path = generate_selfplay_games(cfg)
@@ -92,6 +96,10 @@ def test_generate_selfplay_games_triggers_training(monkeypatch, tmp_path: Path) 
         mcts_num_simulations=4,
         train_after=True,
         train_config=str(tmp_path / "train.yaml"),
+        max_datasets=None,
+        train_every_batches=1,
+        run_forever=False,
+        max_batches=None,
     )
 
     generate_selfplay_games(cfg)
@@ -142,7 +150,73 @@ def test_generate_selfplay_games_stockfish_eval(monkeypatch, tmp_path: Path) -> 
         eval_depth=1,
         eval_log_interval=1,
         eval_multipv=2,
+        max_datasets=None,
+        train_every_batches=1,
+        run_forever=False,
+        max_batches=None,
     )
 
     generate_selfplay_games(cfg)
     assert calls  # engine was queried
+
+
+def test_selfplay_respects_dataset_limit(monkeypatch, tmp_path: Path) -> None:
+    train_calls: List[List[str]] = []
+
+    def fake_train(cfg: TrainConfig) -> TrainSummary:
+        train_calls.append(list(cfg.data.selfplay_datasets))
+        return TrainSummary(epochs_completed=0, steps=0, last_loss=0.0)
+
+    def fake_load_config(path: Path) -> TrainConfig:
+        data_cfg = DataConfig(
+            pgn_paths=[],
+            max_games=1,
+            transforms=["identity"],
+            target={"type": "selfplay"},
+            selfplay_datasets=[],
+            shuffle=False,
+            num_workers=0,
+            pin_memory=False,
+        )
+        model_cfg = TrainModelConfig(num_moves=NUM_MOVES, d_model=32, nhead=4, depth=1, dim_feedforward=64, dropout=0.0, use_act=False)
+        return TrainConfig(
+            model=model_cfg,
+            data=data_cfg,
+            optim=OptimConfig(),
+            training=TrainingConfig(epochs=0, batch_size=1, k_train=1, detach_prev_policy=True, act_weight=0.0, value_loss="mse", device="cpu", log_interval=0),
+            checkpoint=CheckpointConfig(directory=str(tmp_path / "ckpt"), save_interval=0),
+            logging=LoggingConfig(enabled=False, log_dir="runs"),
+        )
+
+    monkeypatch.setattr("chessref.train.selfplay.train", fake_train)
+    monkeypatch.setattr("chessref.train.selfplay.load_train_config", fake_load_config)
+
+    output = tmp_path / "out.pgn"
+    dataset = tmp_path / "data.pt"
+    cfg = SelfPlayConfig(
+        model=ModelConfig(num_moves=4672, d_model=32, nhead=4, depth=1, dim_feedforward=64, dropout=0.0, use_act=False),
+        checkpoint=None,
+        num_games=1,
+        max_moves=3,
+        output_pgn=str(output),
+        output_dataset=str(dataset),
+        device="cpu",
+        inference_max_loops=1,
+        temperature=1.0,
+        mcts_num_simulations=4,
+        train_after=True,
+        train_config=str(tmp_path / "train.yaml"),
+        max_datasets=1,
+        train_every_batches=1,
+        run_forever=True,
+        max_batches=2,
+    )
+
+    generate_selfplay_games(cfg)
+
+    assert len(train_calls) == 2
+    assert all(len(call) == 1 for call in train_calls)
+    old_dataset = dataset.with_name(f"{dataset.stem}_b0{dataset.suffix}")
+    new_dataset = dataset.with_name(f"{dataset.stem}_b1{dataset.suffix}")
+    assert not old_dataset.exists()
+    assert new_dataset.exists()

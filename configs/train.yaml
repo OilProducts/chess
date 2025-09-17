@@ -13,7 +13,7 @@ data:
   transforms: [identity, flip_horizontal]
   target:
     type: selfplay
-    stockfish_path: null
+    stockfish_path: "/opt/homebrew/bin/stockfish"
     depth: null
     nodes: null
     multipv: 8
@@ -38,12 +38,12 @@ training:
   act_weight: 0.0
   value_loss: mse
   device: auto
-  log_interval: 50
+  log_interval: 1
 
 checkpoint:
   directory: checkpoints
   save_interval: 0
 
 logging:
-  enabled: false
+  enabled: true
   log_dir: runs

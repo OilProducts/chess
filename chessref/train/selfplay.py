@@ -105,6 +105,10 @@ class SelfPlayConfig:
     eval_movetime: Optional[int] = None
     eval_log_interval: int = 1
     eval_multipv: int = 2
+    max_datasets: Optional[int] = None
+    train_every_batches: int = 1
+    run_forever: bool = False
+    max_batches: Optional[int] = None
 
 
 def _load_config(path: Path) -> SelfPlayConfig:
@@ -154,7 +158,20 @@ def _result_value(board: chess.Board, for_white: bool) -> float:
     return 0.5
 
 
+def _format_batch_path(base: Optional[Path], batch_index: int, run_forever: bool) -> Optional[Path]:
+    if base is None:
+        return None
+    if batch_index == 0 and not run_forever:
+        return base
+    stem = base.stem
+    suffix = base.suffix
+    return base.with_name(f"{stem}_b{batch_index}{suffix}")
+
+
 def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
+    if cfg.train_after and cfg.output_dataset is None:
+        raise ValueError("output_dataset must be set when train_after=True")
+
     device = _select_device(cfg.device)
     model = _load_model(cfg, device)
     mcts = MCTS(
@@ -169,10 +186,12 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
         device=device,
     )
 
-    output_path = Path(cfg.output_pgn)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_base = Path(cfg.output_pgn)
+    output_base.parent.mkdir(parents=True, exist_ok=True)
 
-    dataset: List[TrainingSample] = []
+    dataset_base = Path(cfg.output_dataset) if cfg.output_dataset else None
+    if dataset_base is not None:
+        dataset_base.parent.mkdir(parents=True, exist_ok=True)
 
     engine: Optional[chess.engine.SimpleEngine] = None
     limit: Optional[chess.engine.Limit] = None
@@ -188,108 +207,147 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
             limit_kwargs["movetime"] = cfg.eval_movetime
         limit = chess.engine.Limit(**limit_kwargs)
 
+    dataset_paths: List[str] = []
+    batch_index = 0
+    last_pgn = output_base
+
     try:
-        with output_path.open("w", encoding="utf-8") as handle:
-            for game_index in range(cfg.num_games):
-                print(f"[selfplay] Generating game {game_index + 1}/{cfg.num_games}...")
-                board = chess.Board()
-                game = chess.pgn.Game()
-                node = game
-                move_count = 0
-                episode_records: List[dict] = []
-                cp_losses: List[float] = []
+        while True:
+            pgn_path = _format_batch_path(output_base, batch_index, cfg.run_forever)
+            dataset_path = (
+                _format_batch_path(dataset_base, batch_index, cfg.run_forever)
+                if dataset_base is not None
+                else None
+            )
 
-                while not board.is_game_over(claim_draw=True) and move_count < cfg.max_moves:
-                    visit_counts_dict = mcts.search(board, add_noise=True)
-                    visit_tensor = torch.zeros(NUM_MOVES, dtype=torch.float32)
-                    for move, visits in visit_counts_dict.items():
-                        idx = encode_move(move, board)
-                        visit_tensor[idx] = float(visits)
+            dataset: List[TrainingSample] = []
+            with pgn_path.open("w", encoding="utf-8") as handle:
+                for game_idx in range(cfg.num_games):
+                    global_game = batch_index * cfg.num_games + game_idx + 1
+                    print(f"[selfplay] Generating game {global_game} (batch {batch_index + 1})...")
+                    board = chess.Board()
+                    game = chess.pgn.Game()
+                    node = game
+                    move_count = 0
+                    episode_records: List[dict] = []
+                    cp_losses: List[float] = []
 
-                    move_index = _select_move(visit_tensor, cfg.temperature)
-                    chosen_move: Optional[chess.Move] = None
-                    for move in board.legal_moves:
-                        if encode_move(move, board) == move_index:
-                            chosen_move = move
-                            break
-                    if chosen_move is None:
-                        chosen_move = max(visit_counts_dict.items(), key=lambda item: item[1])[0]
+                    while not board.is_game_over(claim_draw=True) and move_count < cfg.max_moves:
+                        visit_counts_dict = mcts.search(board, add_noise=True)
+                        visit_tensor = torch.zeros(NUM_MOVES, dtype=torch.float32)
+                        for move, visits in visit_counts_dict.items():
+                            idx = encode_move(move, board)
+                            visit_tensor[idx] = float(visits)
 
-                    if engine is not None and limit is not None:
-                        cp_loss, best_move = _evaluate_stockfish_move(engine, limit, board.copy(stack=False), chosen_move, multipv)
-                        cp_losses.append(cp_loss)
-                        if cfg.eval_log_interval > 0 and (move_count + 1) % cfg.eval_log_interval == 0:
-                            print(
-                                f"[selfplay] game={game_index + 1} ply={move_count + 1} "
-                                f"model={chosen_move.uci()} best={best_move.uci()} cp_loss={cp_loss:.1f}"
+                        move_index = _select_move(visit_tensor, cfg.temperature)
+                        chosen_move: Optional[chess.Move] = None
+                        for move in board.legal_moves:
+                            if encode_move(move, board) == move_index:
+                                chosen_move = move
+                                break
+                        if chosen_move is None:
+                            chosen_move = max(visit_counts_dict.items(), key=lambda item: item[1])[0]
+
+                        if engine is not None and limit is not None:
+                            cp_loss, best_move = _evaluate_stockfish_move(
+                                engine,
+                                limit,
+                                board.copy(stack=False),
+                                chosen_move,
+                                multipv,
                             )
+                            cp_losses.append(cp_loss)
+                            if cfg.eval_log_interval > 0 and (move_count + 1) % cfg.eval_log_interval == 0:
+                                print(
+                                    f"[selfplay] batch={batch_index + 1} game={global_game} ply={move_count + 1} "
+                                    f"model={chosen_move.uci()} best={best_move.uci()} cp_loss={cp_loss:.1f}"
+                                )
 
-                    episode_records.append(
-                        {
-                            "fen": board.fen(),
-                            "policy": visit_tensor.clone(),
-                            "move": chosen_move.uci(),
-                            "game_index": game_index,
-                            "ply": move_count,
-                            "turn": board.turn,
-                        }
-                    )
-
-                    board.push(chosen_move)
-                    node = node.add_variation(chosen_move)
-                    move_count += 1
-
-                result = board.result(claim_draw=True)
-                game.headers["Result"] = result
-                handle.write(str(game) + "\n\n")
-                if cp_losses:
-                    mean_loss = sum(cp_losses) / len(cp_losses)
-                    print(
-                        f"[selfplay] Game {game_index + 1} finished result={result} mean_cp_loss={mean_loss:.1f} "
-                        f"moves={len(cp_losses)}"
-                    )
-                else:
-                    print(f"[selfplay] Game {game_index + 1} finished result={result} moves={move_count}")
-
-                for record in episode_records:
-                    value = _result_value(board, for_white=(record["turn"]))
-                    metadata = PositionRecord(
-                        fen=record["fen"],
-                        move_uci=record["move"],
-                        white_result=_result_value(board, True),
-                        ply=record["ply"],
-                        game_index=record["game_index"],
-                    )
-                    planes = board_to_planes(chess.Board(record["fen"]))
-                    policy = record["policy"]
-                    total_visits = policy.sum()
-                    if total_visits > 0:
-                        policy = policy / total_visits
-                    dataset.append(
-                        TrainingSample(
-                            planes=planes,
-                            policy=policy,
-                            value=torch.tensor(value, dtype=torch.float32),
-                            metadata=metadata,
+                        episode_records.append(
+                            {
+                                "fen": board.fen(),
+                                "policy": visit_tensor.clone(),
+                                "move": chosen_move.uci(),
+                                "game_index": game_idx,
+                                "ply": move_count,
+                                "turn": board.turn,
+                            }
                         )
-                    )
 
-        if cfg.output_dataset:
-            ds_path = Path(cfg.output_dataset)
-            ds_path.parent.mkdir(parents=True, exist_ok=True)
-            torch.save(dataset, ds_path)
-            print(f"[selfplay] Saved {len(dataset)} training samples to {ds_path}")
+                        board.push(chosen_move)
+                        node = node.add_variation(chosen_move)
+                        move_count += 1
 
-            if cfg.train_after:
+                    result = board.result(claim_draw=True)
+                    game.headers["Result"] = result
+                    handle.write(str(game) + "\n\n")
+                    if cp_losses:
+                        mean_loss = sum(cp_losses) / len(cp_losses)
+                        print(
+                            f"[selfplay] Game {global_game} finished result={result} mean_cp_loss={mean_loss:.1f} moves={len(cp_losses)}"
+                        )
+                    else:
+                        print(f"[selfplay] Game {global_game} finished result={result} moves={move_count}")
+
+                    for record in episode_records:
+                        value = _result_value(board, for_white=(record["turn"]))
+                        metadata = PositionRecord(
+                            fen=record["fen"],
+                            move_uci=record["move"],
+                            white_result=_result_value(board, True),
+                            ply=record["ply"],
+                            game_index=batch_index,
+                        )
+                        planes = board_to_planes(chess.Board(record["fen"]))
+                        policy = record["policy"]
+                        total_visits = policy.sum()
+                        if total_visits > 0:
+                            policy = policy / total_visits
+                        dataset.append(
+                            TrainingSample(
+                                planes=planes,
+                                policy=policy,
+                                value=torch.tensor(value, dtype=torch.float32),
+                                metadata=metadata,
+                            )
+                        )
+
+            if dataset_path is not None:
+                torch.save(dataset, dataset_path)
+                dataset_paths.append(str(dataset_path))
+                print(f"[selfplay] Saved {len(dataset)} training samples to {dataset_path}")
+                if cfg.max_datasets is not None and len(dataset_paths) > cfg.max_datasets:
+                    stale = dataset_paths.pop(0)
+                    try:
+                        Path(stale).unlink()
+                        print(f"[selfplay] Removed stale dataset {stale}")
+                    except FileNotFoundError:
+                        pass
+
+            if cfg.train_after and ((batch_index + 1) % max(1, cfg.train_every_batches) == 0):
                 train_cfg_path = Path(cfg.train_config) if cfg.train_config else Path("configs/train.yaml")
                 train_cfg = load_train_config(train_cfg_path)
-                datasets = list(train_cfg.data.selfplay_datasets)
-                datasets.append(str(ds_path))
-                train_cfg.data.selfplay_datasets = datasets
-                print(f"[selfplay] Starting supervised training using {len(datasets)} self-play datasets...")
+                combined = list(train_cfg.data.selfplay_datasets)
+                for path in dataset_paths:
+                    if path not in combined:
+                        combined.append(path)
+                if cfg.max_datasets is not None:
+                    combined = combined[-cfg.max_datasets:]
+                train_cfg.data.selfplay_datasets = combined
+                print(
+                    f"[selfplay] Starting supervised training on {len(combined)} datasets (batch {batch_index + 1})"
+                )
                 train(train_cfg)
 
-        return output_path
+            batch_index += 1
+            last_pgn = pgn_path
+
+            if not cfg.run_forever:
+                break
+            if cfg.max_batches is not None and batch_index >= cfg.max_batches:
+                break
+
+        return last_pgn
     finally:
         if engine is not None:
             engine.close()
