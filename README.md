@@ -73,12 +73,6 @@ python -m chessref.eval.eval_policy --config configs/eval.yaml \
 python -m chessref.eval.eval_match --config configs/match.yaml \
   checkpoint=checkpoints/step_5000.pt \
   num_games=10 max_moves=80
-
-# Stockfish centipawn evaluation (set `stockfish_path` first)
-python -m chessref.eval.eval_stockfish --config configs/eval_stockfish.yaml \
-  pgn_paths='["/path/to/val.pgn"]' \
-  checkpoint=checkpoints/step_5000.pt \
-  stockfish_path=/path/to/stockfish
 ```
 
 Both scripts reuse the inference helper (`refine_predict`) so ACT halting and entropy thresholds behave exactly as they do in training.
