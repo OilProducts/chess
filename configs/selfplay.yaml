@@ -1,0 +1,16 @@
+model:
+  num_moves: 4672
+  d_model: 512
+  nhead: 8
+  depth: 8
+  dim_feedforward: 2048
+  dropout: 0.1
+  use_act: false
+
+checkpoint: null
+num_games: 10
+max_moves: 200
+output_pgn: data/selfplay/selfplay.pgn
+device: auto
+inference_max_loops: 4
+temperature: 1.0
