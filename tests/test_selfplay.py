@@ -148,7 +148,6 @@ def test_generate_selfplay_games_stockfish_eval(monkeypatch, tmp_path: Path) -> 
         train_after=False,
         eval_engine_path="fake",
         eval_depth=1,
-        eval_log_interval=1,
         eval_multipv=2,
         max_datasets=None,
         train_every_batches=1,
@@ -185,7 +184,7 @@ def test_selfplay_respects_dataset_limit(monkeypatch, tmp_path: Path) -> None:
             optim=OptimConfig(),
             training=TrainingConfig(epochs=0, batch_size=1, k_train=1, detach_prev_policy=True, act_weight=0.0, value_loss="mse", device="cpu", log_interval=0),
             checkpoint=CheckpointConfig(directory=str(tmp_path / "ckpt"), save_interval=0),
-            logging=LoggingConfig(enabled=False, log_dir="runs"),
+            logging=LoggingConfig(enabled=False),
         )
 
     monkeypatch.setattr("chessref.train.selfplay.train", fake_train)
@@ -220,3 +219,32 @@ def test_selfplay_respects_dataset_limit(monkeypatch, tmp_path: Path) -> None:
     new_dataset = dataset.with_name(f"{dataset.stem}_b1{dataset.suffix}")
     assert not old_dataset.exists()
     assert new_dataset.exists()
+
+
+def test_selfplay_prunes_old_pgns(tmp_path: Path) -> None:
+    output = tmp_path / "selfplay.pgn"
+    dataset_path = tmp_path / "data.pt"
+    cfg = SelfPlayConfig(
+        model=ModelConfig(num_moves=4672, d_model=32, nhead=4, depth=1, dim_feedforward=64, dropout=0.0, use_act=False),
+        checkpoint=None,
+        num_games=1,
+        max_moves=5,
+        output_pgn=str(output),
+        output_dataset=str(dataset_path),
+        device="cpu",
+        inference_max_loops=1,
+        temperature=1.0,
+        mcts_num_simulations=4,
+        train_after=False,
+        max_datasets=None,
+        train_every_batches=1,
+        run_forever=True,
+        max_batches=2,
+        max_pgn_games=1,
+    )
+
+    generate_selfplay_games(cfg)
+
+    pgn_files = sorted(tmp_path.glob("selfplay_*.pgn"))
+    assert len(pgn_files) == 1
+    assert pgn_files[0].name.endswith("_b1.pgn")

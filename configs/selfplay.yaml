@@ -13,7 +13,7 @@ max_moves: 200
 output_pgn: data/selfplay/selfplay.pgn
 output_dataset: data/selfplay/selfplay.pt
 device: auto
-inference_max_loops: 1
+inference_max_loops: 4
 temperature: 1.0
 mcts_num_simulations: 16
 mcts_c_puct: 1.5
@@ -25,9 +25,13 @@ eval_engine_path: "/opt/homebrew/bin/stockfish"
 eval_depth: 12
 eval_nodes: null
 eval_movetime: null
-eval_log_interval: 1
 eval_multipv: 2
-max_datasets: 1
+eval_print_moves: false
+eval_summary_thresholds:
+  mistake: 50
+  blunder: 150
+max_datasets: 30
 train_every_batches: 1
-run_forever: false
+run_forever: true
 max_batches: null
+max_pgn_games: 1000

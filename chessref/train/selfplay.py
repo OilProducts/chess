@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence, Tuple
+
+import statistics
 
 import chess
 import chess.pgn
@@ -54,16 +56,31 @@ def _score_to_cp(score: chess.engine.Score, mate_value: int = 10000) -> float:
     return 0.0
 
 
+@dataclass
+class StockfishEval:
+    chosen_move: chess.Move
+    best_move: chess.Move
+    best_cp: float
+    model_cp: float
+    cp_loss: float
+
+
 def _evaluate_stockfish_move(
     engine: chess.engine.SimpleEngine,
     limit: chess.engine.Limit,
     board: chess.Board,
     move: chess.Move,
     multipv: int,
-) -> tuple[float, chess.Move]:
+) -> StockfishEval:
     analysis = engine.analyse(board, limit, multipv=multipv)
     if not analysis:
-        return 0.0, move
+        return StockfishEval(
+            chosen_move=move,
+            best_move=move,
+            best_cp=0.0,
+            model_cp=0.0,
+            cp_loss=0.0,
+        )
 
     best_entry = analysis[0]
     pv = best_entry.get("pv", [])
@@ -95,9 +112,50 @@ def _evaluate_stockfish_move(
             board.pop()
             model_score = -score
 
-    cp_loss = max(0.0, best_score - model_score)
-    return cp_loss, best_move
+    model_cp = model_score if model_score is not None else 0.0
+    cp_loss = max(0.0, best_score - model_cp)
 
+    return StockfishEval(
+        chosen_move=move,
+        best_move=best_move,
+        best_cp=best_score,
+        model_cp=model_cp,
+        cp_loss=cp_loss,
+    )
+
+
+def _summarize_stockfish_evals(
+    evaluations: Sequence[StockfishEval],
+    thresholds: Optional[Dict[str, float]],
+) -> str:
+    cp_losses = [evaluation.cp_loss for evaluation in evaluations]
+    if not cp_losses:
+        return "stockfish=none"
+
+    mean_loss = statistics.mean(cp_losses)
+    summary_parts = [f"mean_cp_loss={mean_loss:.1f}"]
+
+    if thresholds:
+        for label, threshold in sorted(thresholds.items(), key=lambda item: item[1]):
+            count = sum(1 for loss in cp_losses if loss >= threshold)
+            summary_parts.append(f"{label}={count}")
+
+    return "stockfish=" + " ".join(summary_parts)
+
+
+def _prune_pgn_history(
+    history: List[Tuple[str, int]],
+    limit: int,
+) -> None:
+    total_games = sum(count for _, count in history)
+    while total_games > limit and len(history) > 1:
+        stale_path, stale_count = history.pop(0)
+        total_games -= stale_count
+        try:
+            Path(stale_path).unlink()
+            print(f"[selfplay] Removed stale PGN {stale_path}")
+        except FileNotFoundError:
+            pass
 
 @dataclass
 class SelfPlayConfig:
@@ -120,12 +178,14 @@ class SelfPlayConfig:
     eval_depth: Optional[int] = 12
     eval_nodes: Optional[int] = None
     eval_movetime: Optional[int] = None
-    eval_log_interval: int = 1
     eval_multipv: int = 2
+    eval_print_moves: bool = False
+    eval_summary_thresholds: Optional[Dict[str, float]] = None
     max_datasets: Optional[int] = None
     train_every_batches: int = 1
     run_forever: bool = False
     max_batches: Optional[int] = None
+    max_pgn_games: Optional[int] = None
 
 
 def _load_config(path: Path) -> SelfPlayConfig:
@@ -189,6 +249,8 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
     if cfg.train_after and cfg.output_dataset is None:
         raise ValueError("output_dataset must be set when train_after=True")
 
+    _print_run_configuration(cfg)
+
     device = _select_device(cfg.device)
     model = _load_model(cfg, device)
     mcts = MCTS(
@@ -225,6 +287,7 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
         limit = chess.engine.Limit(**limit_kwargs)
 
     dataset_paths: List[str] = []
+    pgn_history: List[Tuple[str, int]] = []
     batch_index = 0
     last_pgn = output_base
 
@@ -239,6 +302,7 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
 
             dataset: List[TrainingSample] = []
             with pgn_path.open("w", encoding="utf-8") as handle:
+                games_in_batch = 0
                 for game_idx in range(cfg.num_games):
                     global_game = batch_index * cfg.num_games + game_idx + 1
                     print(f"[selfplay] Generating game {global_game} (batch {batch_index + 1})...")
@@ -247,7 +311,7 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
                     node = game
                     move_count = 0
                     episode_records: List[dict] = []
-                    cp_losses: List[float] = []
+                    game_evals: List[StockfishEval] = []
 
                     while not board.is_game_over(claim_draw=True) and move_count < cfg.max_moves:
                         visit_counts_dict = mcts.search(board, add_noise=True)
@@ -266,18 +330,20 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
                             chosen_move = max(visit_counts_dict.items(), key=lambda item: item[1])[0]
 
                         if engine is not None and limit is not None:
-                            cp_loss, best_move = _evaluate_stockfish_move(
+                            eval_result = _evaluate_stockfish_move(
                                 engine,
                                 limit,
                                 board.copy(stack=False),
                                 chosen_move,
                                 multipv,
                             )
-                            cp_losses.append(cp_loss)
-                            if cfg.eval_log_interval > 0 and (move_count + 1) % cfg.eval_log_interval == 0:
+                            game_evals.append(eval_result)
+                            if cfg.eval_print_moves:
                                 print(
                                     f"[selfplay] batch={batch_index + 1} game={global_game} ply={move_count + 1} "
-                                    f"model={chosen_move.uci()} best={best_move.uci()} cp_loss={cp_loss:.1f}"
+                                    f"model={chosen_move.uci()} best={eval_result.best_move.uci()} "
+                                    f"model_cp={eval_result.model_cp:.1f} best_cp={eval_result.best_cp:.1f} "
+                                    f"cp_loss={eval_result.cp_loss:.1f}"
                                 )
 
                         episode_records.append(
@@ -298,13 +364,14 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
                     result = board.result(claim_draw=True)
                     game.headers["Result"] = result
                     handle.write(str(game) + "\n\n")
-                    if cp_losses:
-                        mean_loss = sum(cp_losses) / len(cp_losses)
+                    if game_evals:
+                        summary = _summarize_stockfish_evals(game_evals, cfg.eval_summary_thresholds)
                         print(
-                            f"[selfplay] Game {global_game} finished result={result} mean_cp_loss={mean_loss:.1f} moves={len(cp_losses)}"
+                            f"[selfplay] Game {global_game} finished result={result} plies={move_count} "
+                            f"evaluated={len(game_evals)} {summary}"
                         )
                     else:
-                        print(f"[selfplay] Game {global_game} finished result={result} moves={move_count}")
+                        print(f"[selfplay] Game {global_game} finished result={result} plies={move_count}")
 
                     for record in episode_records:
                         value = _result_value(board, for_white=(record["turn"]))
@@ -329,6 +396,8 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
                             )
                         )
 
+                    games_in_batch += 1
+
             if dataset_path is not None:
                 torch.save(dataset, dataset_path)
                 dataset_paths.append(str(dataset_path))
@@ -340,6 +409,11 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
                         print(f"[selfplay] Removed stale dataset {stale}")
                     except FileNotFoundError:
                         pass
+
+            if games_in_batch > 0:
+                pgn_history.append((str(pgn_path), games_in_batch))
+                if cfg.max_pgn_games is not None:
+                    _prune_pgn_history(pgn_history, cfg.max_pgn_games)
 
             if cfg.train_after and ((batch_index + 1) % max(1, cfg.train_every_batches) == 0):
                 train_cfg_path = Path(cfg.train_config) if cfg.train_config else Path("configs/train.yaml")
@@ -368,6 +442,46 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
     finally:
         if engine is not None:
             engine.close()
+
+
+def _print_run_configuration(cfg: SelfPlayConfig) -> None:
+    print("[selfplay] Configuration summary:")
+    print(
+        f"  model: d_model={cfg.model.d_model} depth={cfg.model.depth} nhead={cfg.model.nhead} "
+        f"dim_feedforward={cfg.model.dim_feedforward} use_act={cfg.model.use_act}"
+    )
+    print(
+        f"  mcts: sims={cfg.mcts_num_simulations} c_puct={cfg.mcts_c_puct} "
+        f"dirichlet_alpha={cfg.mcts_dirichlet_alpha} dirichlet_epsilon={cfg.mcts_dirichlet_epsilon}"
+    )
+    print(
+        f"  refinement: inference_max_loops={cfg.inference_max_loops} temperature={cfg.temperature}"
+    )
+    if cfg.eval_engine_path:
+        print(
+            f"  stockfish: path={cfg.eval_engine_path} depth={cfg.eval_depth} nodes={cfg.eval_nodes} "
+            f"movetime={cfg.eval_movetime} multipv={cfg.eval_multipv}"
+        )
+    else:
+        print("  stockfish: disabled")
+    print(
+        f"  datasets: output_dataset={cfg.output_dataset} max_datasets={cfg.max_datasets} "
+        f"train_after={cfg.train_after} train_every_batches={cfg.train_every_batches}"
+    )
+    print(
+        f"  pgn retention: max_pgn_games={cfg.max_pgn_games} output_pgn={cfg.output_pgn}"
+    )
+    if cfg.run_forever:
+        print(
+            f"  loop: run_forever=true num_games={cfg.num_games} max_batches={cfg.max_batches}"
+        )
+    else:
+        print(
+            f"  loop: run_forever=false num_games={cfg.num_games} max_batches={cfg.max_batches}"
+        )
+    print(
+        f"  checkpoint: checkpoint={cfg.checkpoint} output_dataset={cfg.output_dataset}"
+    )
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:

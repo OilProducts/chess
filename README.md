@@ -52,12 +52,13 @@ python -m chessref.train.selfplay --config configs/selfplay.yaml \
   temperature=0.8
 ```
 
-To see Stockfish feedback during generation, set `eval_engine_path` (and optionally `eval_depth`, `eval_log_interval`) in `configs/selfplay.yaml`. The self-play loop will print lines such as:
+To see Stockfish feedback during generation, set `eval_engine_path` (and optionally `eval_depth`, `eval_print_moves`) in `configs/selfplay.yaml`. Every move is evaluated and summarised at the end of each game. Example output:
 
 ```
-[selfplay] game=3 ply=12 model=e2e4 best=e2e4 cp_loss=5.0
-[selfplay] Game 3 finished result=1-0 mean_cp_loss=12.3 moves=38
+[selfplay] Game 3 finished result=1-0 plies=76 evaluated=76 stockfish=mean_cp_loss=18.4 blunder=2
 ```
+
+Enable per-move logging by setting `eval_print_moves=true` to see lines such as `model=e2e4 best=e2e4 model_cp=12.0 best_cp=12.0 cp_loss=0.0`.
 
 The command writes a PGN containing the requested number of self-play games **and** a tensor dataset with visit-count policy targets. Feed these back into supervised training by pointing `data.selfplay_datasets` (and optionally `data.pgn_paths`) at the generated files:
 
@@ -67,10 +68,14 @@ python -m chessref.train.train_supervised --config configs/train.yaml \
   data.pgn_paths=[]
 ```
 
+The `.pt` tensor datasets are pickled lists of `TrainingSample` objects. Each sample stores the encoded board planes, the normalised policy target (visit-count distribution from MCTS), the eventual game result for the side to move, and lightweight metadata (FEN, ply, game index). When you add these files to `data.selfplay_datasets`, the supervised trainer loads them directly into PyTorch without re-parsing PGNs, so new self-play batches can be recycled into training almost immediately.
+
 Additional knobs (see `configs/selfplay.yaml`):
 - `max_datasets`: cap how many recent self-play batches to retain (older `.pt` files are deleted).
 - `train_every_batches`: run supervised training every N batches when `train_after=true`.
 - `run_forever`/`max_batches`: continuously generate batches until interrupted (useful for automation).
+- `eval_summary_thresholds`: configure cp-loss cutoffs that will be counted in the per-game summary (e.g., mistakes/blunders).
+- `max_pgn_games`: keep at most N recent self-play games on disk; older PGN files are pruned automatically.
 
 ## Evaluation & Matches
 
