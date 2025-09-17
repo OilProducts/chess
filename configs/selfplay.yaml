@@ -11,6 +11,11 @@ checkpoint: null
 num_games: 10
 max_moves: 200
 output_pgn: data/selfplay/selfplay.pgn
+output_dataset: data/selfplay/selfplay.pt
 device: auto
-inference_max_loops: 4
+inference_max_loops: 1
 temperature: 1.0
+mcts_num_simulations: 128
+mcts_c_puct: 1.5
+mcts_dirichlet_alpha: 0.3
+mcts_dirichlet_epsilon: 0.25

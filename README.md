@@ -46,10 +46,17 @@ python -m chessref.train.selfplay --config configs/selfplay.yaml \
   checkpoint=checkpoints/step_5000.pt \
   num_games=50 max_moves=160 \
   output_pgn=data/selfplay/selfplay_50games.pgn \
+  output_dataset=data/selfplay/selfplay_50games.pt \
   temperature=0.8
 ```
 
-The command writes a PGN containing the requested number of self-play games. Feed the resulting file back into supervised training by appending the path to `data.pgn_paths`.
+The command writes a PGN containing the requested number of self-play games **and** a tensor dataset with visit-count policy targets. Feed these back into supervised training by pointing `data.selfplay_datasets` (and optionally `data.pgn_paths`) at the generated files:
+
+```bash
+python -m chessref.train.train_supervised --config configs/train.yaml \
+  data.selfplay_datasets='["data/selfplay/selfplay_50games.pt"]' \
+  data.pgn_paths=[]
+```
 
 ## Evaluation & Matches
 

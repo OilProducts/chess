@@ -9,16 +9,18 @@ from typing import Any, Iterable, List, Optional, Sequence
 
 import torch
 from torch.cuda.amp import GradScaler, autocast
-from torch.utils.data import DataLoader
+from torch.utils.data import ConcatDataset, DataLoader
 
 from omegaconf import OmegaConf
 
 from chessref.data.dataset import (
     ChessSampleDataset,
+    PrecomputedSampleDataset,
     build_target_generator,
     collate_samples,
     load_records,
 )
+from chessref.data.pgn_extract import TrainingSample
 from chessref.model.loss import LossConfig, compute_refiner_loss
 from chessref.model.refiner import IterativeRefiner
 from chessref.moves.legal_mask import legal_move_mask
@@ -43,6 +45,7 @@ class DataConfig:
     max_games: Optional[int] = None
     transforms: List[str] = field(default_factory=lambda: ["identity"])
     target: dict[str, Any] = field(default_factory=lambda: {"type": "selfplay"})
+    selfplay_datasets: List[str] = field(default_factory=list)
     shuffle: bool = True
     num_workers: int = 0
     pin_memory: bool = False
@@ -121,16 +124,32 @@ def _load_config(path: Path) -> TrainConfig:
 
 
 def _prepare_dataloader(cfg: TrainConfig) -> DataLoader:
-    if not cfg.data.pgn_paths:
-        raise ValueError("At least one PGN path must be provided in data.pgn_paths")
+    datasets = []
 
-    paths = [Path(p) for p in cfg.data.pgn_paths]
-    records = load_records(paths, max_games=cfg.data.max_games)
-    if not records:
-        raise ValueError("No records extracted from the provided PGNs")
+    if cfg.data.pgn_paths:
+        paths = [Path(p) for p in cfg.data.pgn_paths]
+        records = load_records(paths, max_games=cfg.data.max_games)
+        if records:
+            target_generator = build_target_generator(cfg.data.target)
+            datasets.append(
+                ChessSampleDataset(records, target_generator, transforms=cfg.data.transforms)
+            )
 
-    target_generator = build_target_generator(cfg.data.target)
-    dataset = ChessSampleDataset(records, target_generator, transforms=cfg.data.transforms)
+    if cfg.data.selfplay_datasets:
+        samples: List[TrainingSample] = []
+        for dataset_path in cfg.data.selfplay_datasets:
+            loaded = torch.load(dataset_path, map_location="cpu", weights_only=False)
+            samples.extend(loaded)
+        if samples:
+            datasets.append(PrecomputedSampleDataset(samples))
+
+    if not datasets:
+        raise ValueError("No training data provided (PGNs or selfplay datasets).")
+
+    if len(datasets) == 1:
+        dataset = datasets[0]
+    else:
+        dataset = ConcatDataset(datasets)
 
     loader = DataLoader(
         dataset,

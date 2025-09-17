@@ -11,7 +11,9 @@ from chessref.data.dataset import (
     load_records,
 )
 from chessref.data.engine_targets import SelfPlayTargetGenerator
-from chessref.data.pgn_extract import extract_position_records
+from chessref.data.pgn_extract import TrainingSample, extract_position_records
+from chessref.data.planes import board_to_planes
+from chessref.data.pgn_extract import PositionRecord
 from chessref.data.planes import NUM_PLANES
 from chessref.moves.encoding import NUM_MOVES, encode_move
 
@@ -71,3 +73,27 @@ def test_build_target_generator_requires_stockfish_path() -> None:
     cfg = {"type": "stockfish"}
     with pytest.raises(ValueError):
         build_target_generator(cfg)
+
+
+def test_precomputed_dataset_roundtrip(tmp_path: Path) -> None:
+    from chessref.data.dataset import PrecomputedSampleDataset
+
+    record = PositionRecord(
+        fen=chess.STARTING_FEN,
+        move_uci="e2e4",
+        white_result=1.0,
+        ply=0,
+        game_index=0,
+    )
+    planes = board_to_planes(chess.Board())
+    policy = torch.zeros(NUM_MOVES)
+    policy[0] = 1.0
+    sample = TrainingSample(
+        planes=planes,
+        policy=policy,
+        value=torch.tensor(1.0),
+        metadata=record,
+    )
+    dataset = PrecomputedSampleDataset([sample])
+    batch = collate_samples([dataset[0]])
+    assert batch.planes.shape == (1, NUM_PLANES, 8, 8)

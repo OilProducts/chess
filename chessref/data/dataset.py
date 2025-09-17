@@ -91,6 +91,19 @@ class ChessSampleDataset(Dataset[TrainingSample]):
         return sample
 
 
+class PrecomputedSampleDataset(Dataset[TrainingSample]):
+    """Dataset backed by precomputed :class:`TrainingSample` objects."""
+
+    def __init__(self, samples: Sequence[TrainingSample]) -> None:
+        self._samples = list(samples)
+
+    def __len__(self) -> int:
+        return len(self._samples)
+
+    def __getitem__(self, idx: int) -> TrainingSample:
+        return self._samples[idx]
+
+
 def collate_samples(samples: Sequence[TrainingSample]) -> SampleBatch:
     planes = torch.stack([sample.planes for sample in samples])
     policy = torch.stack([sample.policy for sample in samples])
@@ -157,6 +170,7 @@ if __name__ == "__main__":
 
 __all__ = [
     "ChessSampleDataset",
+    "PrecomputedSampleDataset",
     "SampleBatch",
     "collate_samples",
     "build_target_generator",

@@ -18,6 +18,7 @@ data:
     nodes: null
     multipv: 8
     temperature: 1.0
+  selfplay_datasets: []
   shuffle: true
   num_workers: 0
   pin_memory: false
