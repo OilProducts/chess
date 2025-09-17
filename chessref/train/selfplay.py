@@ -27,14 +27,31 @@ from chessref.train.train_supervised import (
 )
 
 
-def _score_to_cp(score: chess.engine.PovScore, mate_value: int = 10000) -> float:
-    cp = score.cp
+def _score_to_cp(score: chess.engine.Score, mate_value: int = 10000) -> float:
+    """Return a numeric centipawn approximation for a :class:`chess.engine.Score`."""
+
+    # Prefer python-chess helper methods when available.
+    if hasattr(score, "is_mate") and score.is_mate():  # type: ignore[attr-defined]
+        mate = score.mate()  # type: ignore[attr-defined]
+        if mate is None:
+            return 0.0
+        return mate_value if mate > 0 else -mate_value
+
+    if hasattr(score, "is_cp") and score.is_cp():  # type: ignore[attr-defined]
+        cp = score.cp()  # type: ignore[attr-defined]
+        if cp is not None:
+            return float(cp)
+
+    # Fallback for PovScore objects (.cp / .mate attributes)
+    cp = getattr(score, "cp", None)
     if cp is not None:
         return float(cp)
-    mate = score.mate
-    if mate is None:
-        return 0.0
-    return mate_value if mate > 0 else -mate_value
+
+    mate = getattr(score, "mate", None)
+    if mate is not None:
+        return mate_value if mate > 0 else -mate_value
+
+    return 0.0
 
 
 def _evaluate_stockfish_move(

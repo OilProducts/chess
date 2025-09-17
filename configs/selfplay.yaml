@@ -27,3 +27,7 @@ eval_nodes: null
 eval_movetime: null
 eval_log_interval: 1
 eval_multipv: 2
+max_datasets: 1
+train_every_batches: 1
+run_forever: false
+max_batches: null
