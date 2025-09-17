@@ -15,7 +15,7 @@ output_dataset: data/selfplay/selfplay.pt
 device: auto
 inference_max_loops: 1
 temperature: 1.0
-mcts_num_simulations: 16
+mcts_num_simulations: 128
 mcts_c_puct: 1.5
 mcts_dirichlet_alpha: 0.3
 mcts_dirichlet_epsilon: 0.25
