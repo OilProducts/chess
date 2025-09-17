@@ -38,19 +38,19 @@ training:
   act_weight: 0.0
   value_loss: mse
   device: auto
-  log_interval: 50
+  log_interval: 5
 
 checkpoint:
   directory: checkpoints
   save_interval: 0
 
 logging:
-  enabled: false
+  enabled: true
   log_dir: runs
 
 stockfish_eval:
-  enabled: false
-  engine_path: ""
+  enabled: true
+  engine_path: "/opt/homebrew/bin/stockfish"
   depth: 12
   nodes: null
   movetime: null

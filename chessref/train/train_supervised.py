@@ -6,6 +6,7 @@ import argparse
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, List, Optional, Sequence
+import time
 import random
 
 import torch
@@ -18,6 +19,7 @@ import chess.engine
 from chessref.data.dataset import (
     ChessSampleDataset,
     PrecomputedSampleDataset,
+    SampleBatch,
     build_target_generator,
     collate_samples,
     load_records,
@@ -309,6 +311,40 @@ def _log_stockfish_metrics(
     )
 
 
+def _print_run_header(cfg: TrainConfig, dataset_len: int) -> None:
+    print("=== Training Configuration ===")
+    model_cfg = cfg.model
+    print(
+        f"Model: d_model={model_cfg.d_model} depth={model_cfg.depth} nhead={model_cfg.nhead} "
+        f"dim_feedforward={model_cfg.dim_feedforward} use_act={model_cfg.use_act}"
+    )
+    data_cfg = cfg.data
+    print(
+        f"Data: pgns={len(data_cfg.pgn_paths)} selfplay_sets={len(data_cfg.selfplay_datasets)} "
+        f"transforms={data_cfg.transforms} target={data_cfg.target.get('type', 'selfplay')}"
+    )
+    print(f"Dataset size: {dataset_len} samples")
+    optim_cfg = cfg.optim
+    print(
+        f"Optim: lr={optim_cfg.lr} weight_decay={optim_cfg.weight_decay} "
+        f"grad_accum={optim_cfg.grad_accum_steps} use_amp={optim_cfg.use_amp}"
+    )
+    train_cfg = cfg.training
+    print(
+        f"Training: epochs={train_cfg.epochs} batch_size={train_cfg.batch_size} k_train={train_cfg.k_train} "
+        f"detach_prev_policy={train_cfg.detach_prev_policy} device={train_cfg.device}"
+    )
+    if cfg.stockfish_eval.enabled:
+        sf = cfg.stockfish_eval
+        print(
+            f"Stockfish eval: engine={sf.engine_path} depth={sf.depth} sample_size={sf.sample_size} "
+            f"multipv={sf.multipv}"
+        )
+    else:
+        print("Stockfish eval: disabled")
+    print("===============================")
+
+
 def train(cfg: TrainConfig) -> TrainSummary:
     device = _select_device(cfg.training.device)
     dataloader = _prepare_dataloader(cfg)
@@ -317,6 +353,9 @@ def train(cfg: TrainConfig) -> TrainSummary:
     use_amp = cfg.optim.use_amp and device.type == "cuda"
     scaler = GradScaler(enabled=use_amp)
     logger = TrainLogger(cfg.logging)
+
+    dataset_len = len(dataloader.dataset)  # type: ignore[attr-defined]
+    _print_run_header(cfg, dataset_len)
 
     loss_cfg = LossConfig(
         policy_weight=1.0,
