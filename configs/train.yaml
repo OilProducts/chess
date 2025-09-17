@@ -47,3 +47,12 @@ checkpoint:
 logging:
   enabled: false
   log_dir: runs
+
+stockfish_eval:
+  enabled: false
+  engine_path: ""
+  depth: 12
+  nodes: null
+  movetime: null
+  sample_size: 1
+  multipv: 1
