@@ -106,6 +106,7 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
 
     with output_path.open("w", encoding="utf-8") as handle:
         for game_index in range(cfg.num_games):
+            print(f"[selfplay] Generating game {game_index + 1}/{cfg.num_games}...")
             board = chess.Board()
             game = chess.pgn.Game()
             node = game
@@ -146,6 +147,7 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
             result = board.result(claim_draw=True)
             game.headers["Result"] = result
             handle.write(str(game) + "\n\n")
+            print(f"[selfplay] Game {game_index + 1} finished with result {result} in {move_count} plies")
 
             for record in episode_records:
                 value = _result_value(board, for_white=(record["turn"]))
@@ -174,6 +176,7 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
         ds_path = Path(cfg.output_dataset)
         ds_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(dataset, ds_path)
+        print(f"[selfplay] Saved {len(dataset)} training samples to {ds_path}")
 
     return output_path
 
