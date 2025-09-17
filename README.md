@@ -27,18 +27,6 @@ python -m chessref.train.train_supervised --config configs/train.yaml \
   training.epochs=4 training.batch_size=128 \
   checkpoint.save_interval=500 \
   logging.enabled=true logging.log_dir=runs/exp1
-
-Enable inline Stockfish logging by setting:
-
-```yaml
-stockfish_eval:
-  enabled: true
-  engine_path: /path/to/stockfish
-  depth: 12
-  sample_size: 2
-```
-
-The trainer will print messages like `[stockfish] step=150 mean_cp_loss=85.0 top1=0.40` alongside the usual loss metrics.
 ```
 
 Key knobs exposed via `configs/train.yaml`:

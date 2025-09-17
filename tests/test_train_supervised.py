@@ -1,8 +1,4 @@
 from pathlib import Path
-from typing import List
-
-import chess
-import chess.engine
 
 from chessref.moves.encoding import NUM_MOVES
 from chessref.train.train_supervised import (
@@ -10,7 +6,6 @@ from chessref.train.train_supervised import (
     DataConfig,
     ModelConfig,
     OptimConfig,
-    StockfishEvalConfig,
     TrainConfig,
     TrainSummary,
     TrainingConfig,
@@ -70,67 +65,3 @@ def test_train_loop_smoke(tmp_path: Path) -> None:
     assert summary.epochs_completed == 1
     assert summary.steps > 0
     assert summary.last_loss == summary.last_loss  # not NaN
-
-
-def test_train_with_stockfish_eval(monkeypatch, tmp_path: Path) -> None:
-    pgn_path = _write_sample_pgn(tmp_path)
-
-    engines: List[FakeEngine] = []
-
-    class FakeEngine:
-        def __init__(self) -> None:
-            self.closed = False
-
-        def analyse(self, board: chess.Board, limit, multipv: int = 1):
-            moves = list(board.legal_moves)
-            move = moves[0]
-            score = chess.engine.PovScore(chess.engine.Cp(100), chess.WHITE if board.turn else chess.BLACK)
-            entries = [{"pv": [move], "score": score}]
-            if multipv > 1 and len(moves) > 1:
-                second_score = chess.engine.PovScore(chess.engine.Cp(50), chess.WHITE if board.turn else chess.BLACK)
-                entries.append({"pv": [moves[1]], "score": second_score})
-            return entries[:multipv]
-
-        def close(self) -> None:
-            self.closed = True
-
-    def fake_engine_factory(path: str):
-        engine = FakeEngine()
-        engines.append(engine)
-        return engine
-
-    monkeypatch.setattr("chess.engine.SimpleEngine.popen_uci", fake_engine_factory)
-
-    model_cfg = ModelConfig(num_moves=NUM_MOVES, d_model=32, nhead=4, depth=1, dim_feedforward=128, dropout=0.0, use_act=False)
-    data_cfg = DataConfig(
-        pgn_paths=[str(pgn_path)],
-        max_games=1,
-        transforms=["identity"],
-        target={"type": "selfplay"},
-        shuffle=False,
-    )
-    optim_cfg = OptimConfig(lr=1e-3, weight_decay=0.0, betas=(0.9, 0.999), grad_accum_steps=1, use_amp=False)
-    training_cfg = TrainingConfig(
-        epochs=1,
-        batch_size=2,
-        k_train=1,
-        detach_prev_policy=True,
-        act_weight=0.0,
-        value_loss="mse",
-        device="cpu",
-        log_interval=1,
-    )
-    checkpoint_cfg = CheckpointConfig(directory=str(tmp_path / "ckpt"), save_interval=0)
-    stockfish_cfg = StockfishEvalConfig(enabled=True, engine_path="fake", depth=1, sample_size=1)
-
-    cfg = TrainConfig(
-        model=model_cfg,
-        data=data_cfg,
-        optim=optim_cfg,
-        training=training_cfg,
-        checkpoint=checkpoint_cfg,
-        stockfish_eval=stockfish_cfg,
-    )
-
-    train(cfg)
-    assert engines and engines[-1].closed
