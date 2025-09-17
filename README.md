@@ -26,15 +26,16 @@ python -m chessref.train.train_supervised --config configs/train.yaml \
   data.pgn_paths='["/path/to/train.pgn"]' \
   training.epochs=4 training.batch_size=128 \
   checkpoint.save_interval=500 \
-  logging.enabled=true logging.log_dir=runs/exp1
+  logging.enabled=true logging.experiment=chessref logging.run_name=exp1
 ```
 
 Key knobs exposed via `configs/train.yaml`:
 - `training.k_train`: number of refinement loops to supervise (baseline `4–8`).
 - `detatch_prev_policy`: toggle for deep-supervision detach behaviour.
-- `logging.enabled`: if `true`, TensorBoard logs land under `logging.log_dir`.
+- `logging.enabled`: enable MLflow metric logging (see `logging.experiment` / `logging.run_name`).
 - `checkpoint.save_interval`: controls checkpoint cadence.
 
+When MLflow logging is enabled, runs are recorded in the configured tracking URI (default `./mlruns`). Launch `mlflow ui --backend-store-uri mlruns` to inspect metrics.
 Grad accumulation, AMP, and legality-aware masking are already wired in; you only need to override config values on the command line when experimenting.
 
 ## Self-Play Generation

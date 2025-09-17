@@ -75,7 +75,7 @@ def test_generate_selfplay_games_triggers_training(monkeypatch, tmp_path: Path) 
             optim=OptimConfig(),
             training=TrainingConfig(epochs=0, batch_size=1, k_train=1, detach_prev_policy=True, act_weight=0.0, value_loss="mse", device="cpu", log_interval=0),
             checkpoint=CheckpointConfig(directory=str(tmp_path / "ckpt"), save_interval=0),
-            logging=LoggingConfig(enabled=False, log_dir="runs"),
+            logging=LoggingConfig(enabled=False),
         )
 
     monkeypatch.setattr("chessref.train.selfplay.train", fake_train)

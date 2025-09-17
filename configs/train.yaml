@@ -46,4 +46,6 @@ checkpoint:
 
 logging:
   enabled: true
-  log_dir: runs
+  tracking_uri: null
+  experiment: chessref
+  run_name: null
