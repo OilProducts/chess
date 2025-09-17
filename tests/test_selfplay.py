@@ -1,5 +1,8 @@
 from pathlib import Path
+from typing import List
 
+import chess
+import chess.engine
 import torch
 
 from chessref.train.selfplay import SelfPlayConfig, generate_selfplay_games
@@ -95,3 +98,51 @@ def test_generate_selfplay_games_triggers_training(monkeypatch, tmp_path: Path) 
     assert "cfg" in train_called
     assert dataset_path.exists()
     assert dataset_path.as_posix() in train_called["cfg"].data.selfplay_datasets
+
+
+def test_generate_selfplay_games_stockfish_eval(monkeypatch, tmp_path: Path) -> None:
+    calls: List[int] = []
+
+    class FakeEngine:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def analyse(self, board: chess.Board, limit, multipv: int = 1):
+            calls.append(1)
+            moves = list(board.legal_moves)
+            move1 = moves[0]
+            score1 = chess.engine.PovScore(chess.engine.Cp(100), chess.WHITE if board.turn else chess.BLACK)
+            entries = [{"pv": [move1], "score": score1}]
+            if multipv > 1 and len(moves) > 1:
+                move2 = moves[1]
+                score2 = chess.engine.PovScore(chess.engine.Cp(50), chess.WHITE if board.turn else chess.BLACK)
+                entries.append({"pv": [move2], "score": score2})
+            return entries
+
+        def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr("chess.engine.SimpleEngine.popen_uci", lambda path: FakeEngine())
+
+    output = tmp_path / "out.pgn"
+    dataset_path = tmp_path / "data.pt"
+    cfg = SelfPlayConfig(
+        model=ModelConfig(num_moves=4672, d_model=32, nhead=4, depth=1, dim_feedforward=64, dropout=0.0, use_act=False),
+        checkpoint=None,
+        num_games=1,
+        max_moves=3,
+        output_pgn=str(output),
+        output_dataset=str(dataset_path),
+        device="cpu",
+        inference_max_loops=1,
+        temperature=1.0,
+        mcts_num_simulations=4,
+        train_after=False,
+        eval_engine_path="fake",
+        eval_depth=1,
+        eval_log_interval=1,
+        eval_multipv=2,
+    )
+
+    generate_selfplay_games(cfg)
+    assert calls  # engine was queried

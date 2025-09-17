@@ -9,14 +9,15 @@ from typing import List, Optional, Sequence
 
 import chess
 import chess.pgn
+import chess.engine
 import torch
 from omegaconf import OmegaConf
 
 from chessref.data.pgn_extract import PositionRecord, TrainingSample
 from chessref.data.planes import board_to_planes
 from chessref.inference.mcts import MCTS, MCTSConfig
-from chessref.model.refiner import IterativeRefiner
 from chessref.moves.encoding import NUM_MOVES, encode_move
+from chessref.model.refiner import IterativeRefiner
 from chessref.train.train_supervised import (
     ModelConfig,
     TrainConfig,
@@ -24,6 +25,61 @@ from chessref.train.train_supervised import (
     train,
     _select_device,
 )
+
+
+def _score_to_cp(score: chess.engine.PovScore, mate_value: int = 10000) -> float:
+    cp = score.cp
+    if cp is not None:
+        return float(cp)
+    mate = score.mate
+    if mate is None:
+        return 0.0
+    return mate_value if mate > 0 else -mate_value
+
+
+def _evaluate_stockfish_move(
+    engine: chess.engine.SimpleEngine,
+    limit: chess.engine.Limit,
+    board: chess.Board,
+    move: chess.Move,
+    multipv: int,
+) -> tuple[float, chess.Move]:
+    analysis = engine.analyse(board, limit, multipv=multipv)
+    if not analysis:
+        return 0.0, move
+
+    best_entry = analysis[0]
+    pv = best_entry.get("pv", [])
+    best_move = pv[0] if pv else move
+    best_score = _score_to_cp(best_entry["score"].pov(board.turn))
+
+    model_score: Optional[float] = None
+    for entry in analysis:
+        pv = entry.get("pv")
+        if pv and pv[0] == move:
+            model_score = _score_to_cp(entry["score"].pov(board.turn))
+            break
+
+    if model_score is None:
+        board.push(move)
+        if board.is_game_over(claim_draw=True):
+            result = board.result(claim_draw=True)
+            board.pop()
+            if result == "1-0":
+                model_score = 10000.0
+            elif result == "0-1":
+                model_score = -10000.0
+            else:
+                model_score = 0.0
+        else:
+            child_analysis = engine.analyse(board, limit)
+            entry = child_analysis[0] if isinstance(child_analysis, list) else child_analysis
+            score = _score_to_cp(entry["score"].pov(board.turn))
+            board.pop()
+            model_score = -score
+
+    cp_loss = max(0.0, best_score - model_score)
+    return cp_loss, best_move
 
 
 @dataclass
@@ -43,6 +99,12 @@ class SelfPlayConfig:
     temperature: float = 1.0
     train_after: bool = False
     train_config: Optional[str] = None
+    eval_engine_path: Optional[str] = None
+    eval_depth: Optional[int] = 12
+    eval_nodes: Optional[int] = None
+    eval_movetime: Optional[int] = None
+    eval_log_interval: int = 1
+    eval_multipv: int = 2
 
 
 def _load_config(path: Path) -> SelfPlayConfig:
@@ -112,90 +174,125 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
 
     dataset: List[TrainingSample] = []
 
-    with output_path.open("w", encoding="utf-8") as handle:
-        for game_index in range(cfg.num_games):
-            print(f"[selfplay] Generating game {game_index + 1}/{cfg.num_games}...")
-            board = chess.Board()
-            game = chess.pgn.Game()
-            node = game
-            move_count = 0
-            episode_records: List[dict] = []
+    engine: Optional[chess.engine.SimpleEngine] = None
+    limit: Optional[chess.engine.Limit] = None
+    multipv = max(1, cfg.eval_multipv)
+    if cfg.eval_engine_path:
+        engine = chess.engine.SimpleEngine.popen_uci(cfg.eval_engine_path)
+        limit_kwargs = {}
+        if cfg.eval_depth is not None:
+            limit_kwargs["depth"] = cfg.eval_depth
+        if cfg.eval_nodes is not None:
+            limit_kwargs["nodes"] = cfg.eval_nodes
+        if cfg.eval_movetime is not None:
+            limit_kwargs["movetime"] = cfg.eval_movetime
+        limit = chess.engine.Limit(**limit_kwargs)
 
-            while not board.is_game_over(claim_draw=True) and move_count < cfg.max_moves:
-                visit_counts_dict = mcts.search(board, add_noise=True)
-                visit_tensor = torch.zeros(NUM_MOVES, dtype=torch.float32)
-                for move, visits in visit_counts_dict.items():
-                    idx = encode_move(move, board)
-                    visit_tensor[idx] = float(visits)
+    try:
+        with output_path.open("w", encoding="utf-8") as handle:
+            for game_index in range(cfg.num_games):
+                print(f"[selfplay] Generating game {game_index + 1}/{cfg.num_games}...")
+                board = chess.Board()
+                game = chess.pgn.Game()
+                node = game
+                move_count = 0
+                episode_records: List[dict] = []
+                cp_losses: List[float] = []
 
-                move_index = _select_move(visit_tensor, cfg.temperature)
-                chosen_move: Optional[chess.Move] = None
-                for move in board.legal_moves:
-                    if encode_move(move, board) == move_index:
-                        chosen_move = move
-                        break
-                if chosen_move is None:
-                    chosen_move = max(visit_counts_dict.items(), key=lambda item: item[1])[0]
+                while not board.is_game_over(claim_draw=True) and move_count < cfg.max_moves:
+                    visit_counts_dict = mcts.search(board, add_noise=True)
+                    visit_tensor = torch.zeros(NUM_MOVES, dtype=torch.float32)
+                    for move, visits in visit_counts_dict.items():
+                        idx = encode_move(move, board)
+                        visit_tensor[idx] = float(visits)
 
-                episode_records.append(
-                    {
-                        "fen": board.fen(),
-                        "policy": visit_tensor.clone(),
-                        "move": chosen_move.uci(),
-                        "game_index": game_index,
-                        "ply": move_count,
-                        "turn": board.turn,
-                    }
-                )
+                    move_index = _select_move(visit_tensor, cfg.temperature)
+                    chosen_move: Optional[chess.Move] = None
+                    for move in board.legal_moves:
+                        if encode_move(move, board) == move_index:
+                            chosen_move = move
+                            break
+                    if chosen_move is None:
+                        chosen_move = max(visit_counts_dict.items(), key=lambda item: item[1])[0]
 
-                board.push(chosen_move)
-                node = node.add_variation(chosen_move)
-                move_count += 1
+                    if engine is not None and limit is not None:
+                        cp_loss, best_move = _evaluate_stockfish_move(engine, limit, board.copy(stack=False), chosen_move, multipv)
+                        cp_losses.append(cp_loss)
+                        if cfg.eval_log_interval > 0 and (move_count + 1) % cfg.eval_log_interval == 0:
+                            print(
+                                f"[selfplay] game={game_index + 1} ply={move_count + 1} "
+                                f"model={chosen_move.uci()} best={best_move.uci()} cp_loss={cp_loss:.1f}"
+                            )
 
-            result = board.result(claim_draw=True)
-            game.headers["Result"] = result
-            handle.write(str(game) + "\n\n")
-            print(f"[selfplay] Game {game_index + 1} finished with result {result} in {move_count} plies")
-
-            for record in episode_records:
-                value = _result_value(board, for_white=(record["turn"]))
-                metadata = PositionRecord(
-                    fen=record["fen"],
-                    move_uci=record["move"],
-                    white_result=_result_value(board, True),
-                    ply=record["ply"],
-                    game_index=record["game_index"],
-                )
-                planes = board_to_planes(chess.Board(record["fen"]))
-                policy = record["policy"]
-                total_visits = policy.sum()
-                if total_visits > 0:
-                    policy = policy / total_visits
-                dataset.append(
-                    TrainingSample(
-                        planes=planes,
-                        policy=policy,
-                        value=torch.tensor(value, dtype=torch.float32),
-                        metadata=metadata,
+                    episode_records.append(
+                        {
+                            "fen": board.fen(),
+                            "policy": visit_tensor.clone(),
+                            "move": chosen_move.uci(),
+                            "game_index": game_index,
+                            "ply": move_count,
+                            "turn": board.turn,
+                        }
                     )
-                )
 
-    if cfg.output_dataset:
-        ds_path = Path(cfg.output_dataset)
-        ds_path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(dataset, ds_path)
-        print(f"[selfplay] Saved {len(dataset)} training samples to {ds_path}")
+                    board.push(chosen_move)
+                    node = node.add_variation(chosen_move)
+                    move_count += 1
 
-        if cfg.train_after:
-            train_cfg_path = Path(cfg.train_config) if cfg.train_config else Path("configs/train.yaml")
-            train_cfg = load_train_config(train_cfg_path)
-            datasets = list(train_cfg.data.selfplay_datasets)
-            datasets.append(str(ds_path))
-            train_cfg.data.selfplay_datasets = datasets
-            print(f"[selfplay] Starting supervised training using {len(datasets)} self-play datasets...")
-            train(train_cfg)
+                result = board.result(claim_draw=True)
+                game.headers["Result"] = result
+                handle.write(str(game) + "\n\n")
+                if cp_losses:
+                    mean_loss = sum(cp_losses) / len(cp_losses)
+                    print(
+                        f"[selfplay] Game {game_index + 1} finished result={result} mean_cp_loss={mean_loss:.1f} "
+                        f"moves={len(cp_losses)}"
+                    )
+                else:
+                    print(f"[selfplay] Game {game_index + 1} finished result={result} moves={move_count}")
 
-    return output_path
+                for record in episode_records:
+                    value = _result_value(board, for_white=(record["turn"]))
+                    metadata = PositionRecord(
+                        fen=record["fen"],
+                        move_uci=record["move"],
+                        white_result=_result_value(board, True),
+                        ply=record["ply"],
+                        game_index=record["game_index"],
+                    )
+                    planes = board_to_planes(chess.Board(record["fen"]))
+                    policy = record["policy"]
+                    total_visits = policy.sum()
+                    if total_visits > 0:
+                        policy = policy / total_visits
+                    dataset.append(
+                        TrainingSample(
+                            planes=planes,
+                            policy=policy,
+                            value=torch.tensor(value, dtype=torch.float32),
+                            metadata=metadata,
+                        )
+                    )
+
+        if cfg.output_dataset:
+            ds_path = Path(cfg.output_dataset)
+            ds_path.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(dataset, ds_path)
+            print(f"[selfplay] Saved {len(dataset)} training samples to {ds_path}")
+
+            if cfg.train_after:
+                train_cfg_path = Path(cfg.train_config) if cfg.train_config else Path("configs/train.yaml")
+                train_cfg = load_train_config(train_cfg_path)
+                datasets = list(train_cfg.data.selfplay_datasets)
+                datasets.append(str(ds_path))
+                train_cfg.data.selfplay_datasets = datasets
+                print(f"[selfplay] Starting supervised training using {len(datasets)} self-play datasets...")
+                train(train_cfg)
+
+        return output_path
+    finally:
+        if engine is not None:
+            engine.close()
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:

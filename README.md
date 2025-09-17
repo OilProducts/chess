@@ -50,6 +50,13 @@ python -m chessref.train.selfplay --config configs/selfplay.yaml \
   temperature=0.8
 ```
 
+To see Stockfish feedback during generation, set `eval_engine_path` (and optionally `eval_depth`, `eval_log_interval`) in `configs/selfplay.yaml`. The self-play loop will print lines such as:
+
+```
+[selfplay] game=3 ply=12 model=e2e4 best=e2e4 cp_loss=5.0
+[selfplay] Game 3 finished result=1-0 mean_cp_loss=12.3 moves=38
+```
+
 The command writes a PGN containing the requested number of self-play games **and** a tensor dataset with visit-count policy targets. Feed these back into supervised training by pointing `data.selfplay_datasets` (and optionally `data.pgn_paths`) at the generated files:
 
 ```bash

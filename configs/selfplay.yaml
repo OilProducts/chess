@@ -19,3 +19,11 @@ mcts_num_simulations: 128
 mcts_c_puct: 1.5
 mcts_dirichlet_alpha: 0.3
 mcts_dirichlet_epsilon: 0.25
+train_after: false
+train_config: configs/train.yaml
+eval_engine_path: null
+eval_depth: 12
+eval_nodes: null
+eval_movetime: null
+eval_log_interval: 1
+eval_multipv: 2
