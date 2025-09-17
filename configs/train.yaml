@@ -5,7 +5,7 @@ model:
   depth: 8
   dim_feedforward: 2048
   dropout: 0.1
-  use_act: false
+  use_act: true
 
 data:
   pgn_paths: []
@@ -33,9 +33,9 @@ optim:
 training:
   epochs: 1
   batch_size: 32
-  k_train: 4
+  k_train: 16
   detach_prev_policy: true
-  act_weight: 0.0
+  act_weight: 1.0
   value_loss: mse
   device: auto
   log_interval: 1

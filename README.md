@@ -36,6 +36,7 @@ Key knobs exposed via `configs/train.yaml`:
 - `checkpoint.save_interval`: controls checkpoint cadence.
 
 When MLflow logging is enabled, runs are recorded in the configured tracking URI (default `./mlruns`). Launch `mlflow ui --backend-store-uri mlruns` to inspect metrics.
+Training automatically resumes from the latest `iteration_*.pt` inside `checkpoint.directory` and retains the most recent 10 snapshots.
 Grad accumulation, AMP, and legality-aware masking are already wired in; you only need to override config values on the command line when experimenting.
 
 ## Self-Play Generation

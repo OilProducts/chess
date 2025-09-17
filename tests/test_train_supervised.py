@@ -1,6 +1,9 @@
 from pathlib import Path
 
+import torch
+
 from chessref.moves.encoding import NUM_MOVES
+import chessref.train.train_supervised as train_module
 from chessref.train.train_supervised import (
     CheckpointConfig,
     DataConfig,
@@ -10,7 +13,10 @@ from chessref.train.train_supervised import (
     TrainSummary,
     TrainingConfig,
     train,
+    _save_iteration_checkpoint,
+    _resume_from_latest_iteration,
 )
+from chessref.model.refiner import IterativeRefiner
 
 PGN_SAMPLE = """
 [Event "Test"]
@@ -65,3 +71,89 @@ def test_train_loop_smoke(tmp_path: Path) -> None:
     assert summary.epochs_completed == 1
     assert summary.steps > 0
     assert summary.last_loss == summary.last_loss  # not NaN
+
+    iteration_ckpts = list((tmp_path / "ckpt").glob("iteration_*.pt"))
+    assert len(iteration_ckpts) == 1
+
+
+def test_iteration_checkpoint_rotation(tmp_path: Path) -> None:
+    directory = tmp_path / "ckpt"
+    model = IterativeRefiner(num_moves=8, d_model=16, nhead=2, depth=1, dim_feedforward=32, dropout=0.0, use_act=False)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+
+    for step in range(12):
+        _save_iteration_checkpoint(directory, model, optimizer, step, k_train=1, keep=10)
+
+    files = sorted(directory.glob("iteration_*.pt"))
+    assert len(files) == 10
+    indices = sorted(int(path.stem.split("_")[1]) for path in files)
+    assert indices == list(range(2, 12))
+
+
+def test_resume_skips_incompatible_checkpoint(tmp_path: Path) -> None:
+    directory = tmp_path / "ckpt"
+    directory.mkdir(parents=True, exist_ok=True)
+
+    model = IterativeRefiner(num_moves=8, d_model=16, nhead=2, depth=1, dim_feedforward=32, dropout=0.0, use_act=False)
+    optimizer = torch.optim.SGD(model.parameters(), lr=0.1)
+
+    bad_path = directory / "iteration_00000.pt"
+    torch.save({"model": {}}, bad_path)
+
+    step = _resume_from_latest_iteration(directory, model, optimizer, torch.device("cpu"), k_train=1)
+    assert step == 0
+    assert bad_path.exists()
+
+
+def test_train_resumes_from_latest_iteration(tmp_path: Path, monkeypatch) -> None:
+    pgn_path = _write_sample_pgn(tmp_path)
+    checkpoint_dir = tmp_path / "ckpt"
+
+    model_cfg = ModelConfig(num_moves=NUM_MOVES, d_model=64, nhead=4, depth=1, dim_feedforward=128, dropout=0.0, use_act=False)
+    data_cfg = DataConfig(
+        pgn_paths=[str(pgn_path)],
+        max_games=1,
+        transforms=["identity"],
+        target={"type": "selfplay"},
+        shuffle=False,
+    )
+    optim_cfg = OptimConfig(lr=1e-3, weight_decay=0.0, betas=(0.9, 0.999), grad_accum_steps=1, use_amp=False)
+    training_cfg = TrainingConfig(
+        epochs=1,
+        batch_size=4,
+        k_train=1,
+        detach_prev_policy=True,
+        act_weight=0.0,
+        value_loss="mse",
+        device="cpu",
+        log_interval=0,
+    )
+    checkpoint_cfg = CheckpointConfig(directory=str(checkpoint_dir), save_interval=0)
+
+    cfg = TrainConfig(
+        model=model_cfg,
+        data=data_cfg,
+        optim=optim_cfg,
+        training=training_cfg,
+        checkpoint=checkpoint_cfg,
+    )
+
+    summary1 = train(cfg)
+    assert summary1.steps > 0
+    first_ckpt = list(checkpoint_dir.glob("iteration_*.pt"))
+    assert len(first_ckpt) == 1
+
+    calls = {}
+    original_load = train_module.load_checkpoint
+
+    def wrapped_load(*args, **kwargs):
+        calls["path"] = Path(args[0])
+        return original_load(*args, **kwargs)
+
+    monkeypatch.setattr(train_module, "load_checkpoint", wrapped_load)
+
+    summary2 = train(cfg)
+    assert summary2.steps >= summary1.steps
+    assert calls["path"].name.startswith("iteration_00000_")
+    ckpts = sorted(checkpoint_dir.glob("iteration_*.pt"))
+    assert len(ckpts) == 2

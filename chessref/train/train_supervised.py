@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 from dataclasses import dataclass, field
 from pathlib import Path
+import re
 from typing import Any, Iterable, List, Optional, Sequence
 
 import torch
@@ -24,8 +25,12 @@ from chessref.data.pgn_extract import TrainingSample
 from chessref.model.loss import LossConfig, compute_refiner_loss
 from chessref.model.refiner import IterativeRefiner
 from chessref.moves.legal_mask import legal_move_mask
-from chessref.utils.checkpoint import save_checkpoint
+from chessref.utils.checkpoint import load_checkpoint, save_checkpoint
 from chessref.utils.logging import LoggingConfig, TrainLogger
+
+
+_ITERATION_CHECKPOINT_PATTERN = re.compile(r"iteration_(\d+)(?:_.*)?\.pt")
+_ITERATION_CHECKPOINT_LIMIT = 10
 
 
 @dataclass
@@ -191,6 +196,13 @@ def train(cfg: TrainConfig) -> TrainSummary:
     dataloader = _prepare_dataloader(cfg)
     model = _build_model(cfg, device)
     optimizer = _prepare_optimizer(model, cfg)
+    start_step = _resume_from_latest_iteration(
+        Path(cfg.checkpoint.directory),
+        model,
+        optimizer,
+        device,
+        k_train=cfg.training.k_train,
+    )
     use_amp = cfg.optim.use_amp and device.type == "cuda"
     scaler = GradScaler(enabled=use_amp)
     logger = TrainLogger(cfg.logging)
@@ -202,7 +214,7 @@ def train(cfg: TrainConfig) -> TrainSummary:
         value_loss=cfg.training.value_loss,
     )
 
-    global_step = 0
+    global_step = start_step
     accum_counter = 0
     last_loss_value = float("nan")
     model.train()
@@ -311,6 +323,14 @@ def train(cfg: TrainConfig) -> TrainSummary:
 
     logger.close()
 
+    _save_iteration_checkpoint(
+        Path(cfg.checkpoint.directory),
+        model,
+        optimizer,
+        global_step,
+        k_train=cfg.training.k_train,
+    )
+
     return TrainSummary(
         epochs_completed=cfg.training.epochs,
         steps=global_step,
@@ -347,3 +367,118 @@ __all__ = [
     "train",
     "load_train_config",
 ]
+
+
+def _list_iteration_checkpoints(directory: Path) -> List[tuple[int, Path]]:
+    entries: List[tuple[int, Path]] = []
+    for path in directory.glob("iteration_*.pt"):
+        match = _ITERATION_CHECKPOINT_PATTERN.fullmatch(path.name)
+        if match:
+            entries.append((int(match.group(1)), path))
+    return sorted(entries, key=lambda item: item[0])
+
+
+def _save_iteration_checkpoint(
+    directory: Path,
+    model: IterativeRefiner,
+    optimizer: torch.optim.Optimizer,
+    step: int,
+    *,
+    k_train: int,
+    keep: int = _ITERATION_CHECKPOINT_LIMIT,
+) -> Path:
+    directory.mkdir(parents=True, exist_ok=True)
+
+    existing = _list_iteration_checkpoints(directory)
+    next_index = existing[-1][0] + 1 if existing else 0
+    signature = _model_signature(model, k_train)
+    suffix = (
+        f"dm{signature['d_model']}_h{signature['nhead']}_dep{signature['depth']}"
+        f"_ff{signature['dim_feedforward']}_nm{signature['num_moves']}"
+        f"_act{'T' if signature['use_act'] else 'F'}_k{signature['k_train']}"
+    )
+    path = directory / f"iteration_{next_index:05d}_{suffix}.pt"
+
+    save_checkpoint(
+        path,
+        model_state=model.state_dict(),
+        optimizer_state=optimizer.state_dict(),
+        step=step,
+        extra={"model_signature": signature},
+    )
+
+    retained = _list_iteration_checkpoints(directory)
+    if keep > 0 and len(retained) > keep:
+        for _, stale in retained[:-keep]:
+            try:
+                stale.unlink()
+            except FileNotFoundError:
+                pass
+
+    return path
+
+
+def _resume_from_latest_iteration(
+    directory: Path,
+    model: IterativeRefiner,
+    optimizer: torch.optim.Optimizer,
+    device: torch.device,
+    *,
+    k_train: int,
+) -> int:
+    if not directory.exists():
+        return 0
+
+    checkpoints = _list_iteration_checkpoints(directory)
+    expected = _model_signature(model, k_train)
+    for _, path in reversed(checkpoints):
+        checkpoint = load_checkpoint(path, map_location=device)
+        sig = checkpoint.get("model_signature")
+        if sig is None:
+            print(
+                f"[train] Skipping {path.name}: no model signature; expected {expected}."
+            )
+            continue
+        if not _signatures_match(expected, sig):
+            print(
+                f"[train] Skipping {path.name}: signature mismatch {sig} vs expected {expected}."
+            )
+            continue
+
+        model.load_state_dict(checkpoint["model"])
+        if "optimizer" in checkpoint:
+            optimizer.load_state_dict(checkpoint["optimizer"])
+        step = int(checkpoint.get("step", 0) or 0)
+        print(f"[train] Resumed from {path.name} (step={step})")
+        return step
+
+    return 0
+
+
+def _model_signature(model: IterativeRefiner, k_train: Optional[int] = None) -> dict:
+    if not isinstance(model, IterativeRefiner):
+        raise TypeError("_model_signature expects an IterativeRefiner instance")
+
+    encoder_layer = model.encoder.layers[0]
+    if not isinstance(encoder_layer, nn.TransformerEncoderLayer):
+        raise TypeError("Unexpected encoder layer type for signature generation")
+
+    params = {
+        "num_moves": model.num_moves,
+        "d_model": encoder_layer.self_attn.embed_dim,
+        "nhead": encoder_layer.self_attn.num_heads,
+        "depth": len(model.encoder.layers),
+        "dim_feedforward": encoder_layer.linear1.out_features,
+        "use_act": bool(getattr(model, "use_act", False)),
+    }
+    if k_train is not None:
+        params["k_train"] = k_train
+    return params
+
+
+def _signatures_match(expected: dict, actual: dict) -> bool:
+    for key, value in expected.items():
+        if key not in actual or actual[key] != value:
+            return False
+    return True
+from torch import nn
