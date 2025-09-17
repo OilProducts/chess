@@ -1,11 +1,11 @@
 model:
   num_moves: 4672
-  d_model: 512
+  d_model: 256
   nhead: 8
-  depth: 8
-  dim_feedforward: 2048
+  depth: 4
+  dim_feedforward: 1024
   dropout: 0.1
-  use_act: false
+  use_act: true
 
 checkpoint: null
 num_games: 10

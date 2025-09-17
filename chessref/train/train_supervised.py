@@ -105,7 +105,7 @@ def _select_device(device_str: str) -> torch.device:
     return torch.device(device_str)
 
 
-def _load_config(path: Path) -> TrainConfig:
+def load_train_config(path: Path) -> TrainConfig:
     cfg = OmegaConf.load(path)
     model = ModelConfig(**OmegaConf.to_object(cfg.model))
     data = DataConfig(**OmegaConf.to_object(cfg.data))
@@ -323,7 +323,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     parser.add_argument("--config", type=Path, default=Path("configs/train.yaml"))
     args = parser.parse_args(argv)
 
-    cfg = _load_config(args.config)
+    cfg = load_train_config(args.config)
     summary = train(cfg)
     print(
         f"Training complete: epochs={summary.epochs_completed} steps={summary.steps} "
@@ -345,4 +345,5 @@ __all__ = [
     "TrainConfig",
     "TrainSummary",
     "train",
+    "load_train_config",
 ]

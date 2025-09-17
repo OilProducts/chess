@@ -17,7 +17,13 @@ from chessref.data.planes import board_to_planes
 from chessref.inference.mcts import MCTS, MCTSConfig
 from chessref.model.refiner import IterativeRefiner
 from chessref.moves.encoding import NUM_MOVES, encode_move
-from chessref.train.train_supervised import ModelConfig, _select_device
+from chessref.train.train_supervised import (
+    ModelConfig,
+    TrainConfig,
+    load_train_config,
+    train,
+    _select_device,
+)
 
 
 @dataclass
@@ -35,6 +41,8 @@ class SelfPlayConfig:
     mcts_dirichlet_epsilon: float = 0.25
     inference_max_loops: int = 1
     temperature: float = 1.0
+    train_after: bool = False
+    train_config: Optional[str] = None
 
 
 def _load_config(path: Path) -> SelfPlayConfig:
@@ -177,6 +185,15 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
         ds_path.parent.mkdir(parents=True, exist_ok=True)
         torch.save(dataset, ds_path)
         print(f"[selfplay] Saved {len(dataset)} training samples to {ds_path}")
+
+        if cfg.train_after:
+            train_cfg_path = Path(cfg.train_config) if cfg.train_config else Path("configs/train.yaml")
+            train_cfg = load_train_config(train_cfg_path)
+            datasets = list(train_cfg.data.selfplay_datasets)
+            datasets.append(str(ds_path))
+            train_cfg.data.selfplay_datasets = datasets
+            print(f"[selfplay] Starting supervised training using {len(datasets)} self-play datasets...")
+            train(train_cfg)
 
     return output_path
 
