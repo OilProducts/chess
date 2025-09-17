@@ -170,6 +170,7 @@ class SelfPlayConfig:
     mcts_c_puct: float = 1.5
     mcts_dirichlet_alpha: float = 0.3
     mcts_dirichlet_epsilon: float = 0.25
+    mcts_eval_batch_size: int = 1
     inference_max_loops: int = 1
     temperature: float = 1.0
     train_after: bool = False
@@ -261,6 +262,7 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
             dirichlet_alpha=cfg.mcts_dirichlet_alpha,
             dirichlet_epsilon=cfg.mcts_dirichlet_epsilon,
             inference_max_loops=cfg.inference_max_loops,
+            eval_batch_size=cfg.mcts_eval_batch_size,
         ),
         device=device,
     )
@@ -452,7 +454,8 @@ def _print_run_configuration(cfg: SelfPlayConfig) -> None:
     )
     print(
         f"  mcts: sims={cfg.mcts_num_simulations} c_puct={cfg.mcts_c_puct} "
-        f"dirichlet_alpha={cfg.mcts_dirichlet_alpha} dirichlet_epsilon={cfg.mcts_dirichlet_epsilon}"
+        f"dirichlet_alpha={cfg.mcts_dirichlet_alpha} dirichlet_epsilon={cfg.mcts_dirichlet_epsilon} "
+        f"eval_batch={cfg.mcts_eval_batch_size}"
     )
     print(
         f"  refinement: inference_max_loops={cfg.inference_max_loops} temperature={cfg.temperature}"

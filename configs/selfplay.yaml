@@ -15,10 +15,11 @@ output_dataset: data/selfplay/selfplay.pt
 device: auto
 inference_max_loops: 4
 temperature: 1.0
-mcts_num_simulations: 16
+mcts_num_simulations: 256
 mcts_c_puct: 1.5
 mcts_dirichlet_alpha: 0.3
 mcts_dirichlet_epsilon: 0.25
+mcts_eval_batch_size: 16
 train_after: true
 train_config: configs/train.yaml
 eval_engine_path: "/opt/homebrew/bin/stockfish"

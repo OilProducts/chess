@@ -5,7 +5,8 @@ from __future__ import annotations
 import math
 import random
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+import time
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import chess
 import torch
@@ -24,6 +25,7 @@ class MCTSConfig:
     dirichlet_alpha: float = 0.3
     dirichlet_epsilon: float = 0.25
     inference_max_loops: int = 1
+    eval_batch_size: int = 1
 
 
 class _Node:
@@ -65,6 +67,13 @@ class _Node:
         return best_child
 
 
+@dataclass
+class _SimulationTask:
+    node: _Node
+    board: chess.Board
+    path: List[_Node]
+
+
 class MCTS:
     def __init__(self, model: IterativeRefiner, config: Optional[MCTSConfig] = None, *, device: Optional[torch.device] = None) -> None:
         self.model = model
@@ -87,27 +96,69 @@ class MCTS:
             for noise_val, child in zip(noise, root.children.values()):
                 child.prior = child.prior * (1 - self.cfg.dirichlet_epsilon) + noise_val * self.cfg.dirichlet_epsilon
 
-        for _ in range(self.cfg.num_simulations):
+        total_eval_time = 0.0
+        total_eval_positions = 0
+        eval_batches = 0
+
+        pending: List[Tuple[_SimulationTask, float]] = []
+        leaf_tasks: List[_SimulationTask] = []
+
+        for sim in range(self.cfg.num_simulations):
             board_copy = board.copy(stack=False)
             node = root
             path = [node]
 
-            # Selection
             while node.is_expanded() and node.children:
                 node = node.select_child(self.cfg.c_puct)
                 board_copy.push(node.move)
                 path.append(node)
 
-            leaf_value = self._expand_leaf(node, board_copy)
+            if board_copy.is_game_over(claim_draw=True):
+                result = board_copy.result(claim_draw=True)
+                if result == "1-0":
+                    leaf_value = 1.0
+                elif result == "0-1":
+                    leaf_value = -1.0
+                else:
+                    leaf_value = 0.0
+                pending.append((_SimulationTask(node=node, board=board_copy, path=path), leaf_value))
+            else:
+                leaf_tasks.append(_SimulationTask(node=node, board=board_copy, path=path))
 
-            # Backpropagate
-            value_to_propagate = leaf_value
-            for n in reversed(path):
-                n.visit_count += 1
-                n.value_sum += value_to_propagate
-                value_to_propagate = -value_to_propagate
+            if leaf_tasks and (
+                len(leaf_tasks) >= max(1, self.cfg.eval_batch_size)
+                or sim == self.cfg.num_simulations - 1
+            ):
+                batch_boards = [task.board for task in leaf_tasks]
+                start = time.perf_counter()
+                priors_list, values = self._evaluate_many(batch_boards)
+                elapsed = time.perf_counter() - start
+                total_eval_time += elapsed
+                total_eval_positions += len(batch_boards)
+                eval_batches += 1
+                for task, priors, value in zip(leaf_tasks, priors_list, values):
+                    task.node.expand(priors)
+                    pending.append((task, value))
+                leaf_tasks.clear()
+
+            while pending:
+                task, leaf_value = pending.pop()
+                value_to_propagate = leaf_value
+                for n in reversed(task.path):
+                    n.visit_count += 1
+                    n.value_sum += value_to_propagate
+                    value_to_propagate = -value_to_propagate
 
         visit_counts: Dict[chess.Move, int] = {move: child.visit_count for move, child in root.children.items()}
+
+        if total_eval_positions > 0:
+            avg_batch_ms = (total_eval_time / max(1, eval_batches)) * 1000.0
+            avg_pos_ms = (total_eval_time / total_eval_positions) * 1000.0
+            print(
+                f"[mcts] batches={eval_batches} positions={total_eval_positions} "
+                f"avg_batch_ms={avg_batch_ms:.2f} avg_pos_ms={avg_pos_ms:.3f}"
+            )
+
         return visit_counts
 
     @torch.no_grad()
@@ -154,6 +205,42 @@ class MCTS:
         priors, value = self._evaluate(board)
         node.expand(priors)
         return value
+
+    @torch.no_grad()
+    def _evaluate_many(self, boards: Sequence[chess.Board]) -> Tuple[List[Dict[chess.Move, float]], List[float]]:
+        planes = torch.stack([board_to_planes(b) for b in boards]).to(self.device)
+        legal_masks = torch.stack([legal_move_mask(b) for b in boards]).to(self.device)
+        result = refine_predict(
+            self.model,
+            planes,
+            legal_masks,
+            max_loops=self.cfg.inference_max_loops,
+            min_loops=1,
+            use_act=self.model.use_act if hasattr(self.model, "use_act") else False,  # type: ignore[attr-defined]
+        )
+
+        policies = result.final_policy
+        values = result.final_value.tolist()
+
+        priors_list: List[Dict[chess.Move, float]] = []
+        for policy, board in zip(policies, boards):
+            move_priors: Dict[chess.Move, float] = {}
+            for move in board.legal_moves:
+                idx = encode_move(move, board)
+                move_priors[move] = float(policy[idx])
+
+            total = sum(move_priors.values())
+            if total > 0:
+                for move in move_priors:
+                    move_priors[move] /= total
+            else:
+                uniform = 1.0 / max(1, len(move_priors))
+                for move in move_priors:
+                    move_priors[move] = uniform
+
+            priors_list.append(move_priors)
+
+        return priors_list, values
 
 
 __all__ = ["MCTS", "MCTSConfig"]
