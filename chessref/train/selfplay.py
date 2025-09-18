@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -506,7 +506,7 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
                         )
                     )
 
-                timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+                timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
                 unique_id = f"{timestamp}_g{global_game:05d}"
                 pgn_file = pgn_dir / f"{pgn_stem}_{unique_id}{pgn_suffix}"
                 with pgn_file.open("w", encoding="utf-8") as handle:
@@ -539,7 +539,7 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
                         "pgn": str(pgn_file),
                         "num_samples": len(game_samples),
                         "num_plies": move_count,
-                        "timestamp": datetime.utcnow().isoformat(),
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
                     }
                     manifest_entries.append(entry)
                     manifest_entries = _prune_manifest(
