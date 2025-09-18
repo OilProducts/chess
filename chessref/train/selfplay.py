@@ -455,8 +455,12 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
                         if encode_move(move, board) == move_index:
                             chosen_move = move
                             break
-                    if chosen_move is None:
-                        chosen_move = max(visit_counts_dict.items(), key=lambda item: item[1])[0]
+                if chosen_move is None:
+                    print(
+                        "[selfplay] Warning: failed to map move_index to legal move; choosing "
+                        "highest-visit fallback"
+                    )
+                    chosen_move = max(visit_counts_dict.items(), key=lambda item: item[1])[0]
 
                     if engine is not None and limit is not None:
                         eval_result = _evaluate_stockfish_move(
