@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -244,6 +245,10 @@ def _game_files_exist(entry: dict[str, object]) -> bool:
     return dataset_ok and pgn_ok
 
 
+def _dataset_paths_from_manifest(entries: List[dict[str, object]]) -> List[str]:
+    return [str(entry["dataset"]) for entry in entries if isinstance(entry.get("dataset"), str)]
+
+
 def _prune_manifest(
     entries: List[dict[str, object]],
     *,
@@ -386,10 +391,14 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
             manifest_entries,
             max_positions=cfg.max_positions,
         )
-    if manifest_entries:
-        _save_manifest(manifest_path, manifest_entries)
+    _save_manifest(manifest_path, manifest_entries)
 
-    dataset_paths: List[str] = [str(entry["dataset"]) for entry in manifest_entries if "dataset" in entry]
+    manifest_signatures = {
+        entry.get("line_hash")
+        for entry in manifest_entries
+        if isinstance(entry.get("line_hash"), str)
+    }
+    dataset_paths: List[str] = _dataset_paths_from_manifest(manifest_entries)
 
     engine: Optional[chess.engine.SimpleEngine] = None
     limit: Optional[chess.engine.Limit] = None
@@ -506,6 +515,22 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
                         )
                     )
 
+                line_signature = " ".join(record["fen"] for record in episode_records)
+                line_hash = hashlib.sha1(line_signature.encode("utf-8")).hexdigest()
+                if line_hash in manifest_signatures:
+                    duplicates = [entry for entry in manifest_entries if entry.get("line_hash") == line_hash]
+                    for entry in duplicates:
+                        _remove_game_files(entry)
+                    manifest_entries = [entry for entry in manifest_entries if entry.get("line_hash") != line_hash]
+                    manifest_signatures.discard(line_hash)
+                    dataset_paths = _dataset_paths_from_manifest(manifest_entries)
+                    manifest_signatures = {
+                        entry.get("line_hash")
+                        for entry in manifest_entries
+                        if isinstance(entry.get("line_hash"), str)
+                    }
+                    _save_manifest(manifest_path, manifest_entries)
+
                 timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
                 unique_id = f"{timestamp}_g{global_game:05d}"
                 pgn_file = pgn_dir / f"{pgn_stem}_{unique_id}{pgn_suffix}"
@@ -539,16 +564,23 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
                         "pgn": str(pgn_file),
                         "num_samples": len(game_samples),
                         "num_plies": move_count,
+                        "line_hash": line_hash,
                         "result": result,
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                     }
                     manifest_entries.append(entry)
+                    manifest_signatures.add(line_hash)
                     manifest_entries = _prune_manifest(
                         manifest_entries,
                         max_positions=cfg.max_positions,
                     )
+                    manifest_signatures = {
+                        entry.get("line_hash")
+                        for entry in manifest_entries
+                        if isinstance(entry.get("line_hash"), str)
+                    }
                     _save_manifest(manifest_path, manifest_entries)
-                    dataset_paths = [str(item["dataset"]) for item in manifest_entries]
+                    dataset_paths = _dataset_paths_from_manifest(manifest_entries)
 
             if cfg.train_after and games_in_batch > 0 and dataset_paths:
                 train_cfg_path = Path(cfg.train_config) if cfg.train_config else Path("configs/train.yaml")

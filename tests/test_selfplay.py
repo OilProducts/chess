@@ -1,6 +1,6 @@
 import json
 from pathlib import Path
-from typing import List
+from typing import Dict, List
 
 import chess
 import chess.engine
@@ -62,6 +62,8 @@ def test_generate_selfplay_games(tmp_path: Path) -> None:
     assert samples
     pgn_entry = Path(manifest_entries[0]["pgn"])
     assert pgn_entry.exists()
+    assert manifest_entries[0]["result"] in {"1-0", "0-1", "1/2-1/2"}
+    assert "line_hash" in manifest_entries[0]
 
 
 def test_generate_selfplay_games_triggers_training(monkeypatch, tmp_path: Path) -> None:
@@ -276,3 +278,51 @@ def test_selfplay_prunes_old_pgns(tmp_path: Path) -> None:
     remaining_pgn = Path(manifest_entries[0]["pgn"])
     assert remaining_pgn.exists()
     assert "g00002" in remaining_pgn.name
+    assert manifest_entries[0]["result"] in {"1-0", "0-1", "1/2-1/2"}
+    assert "line_hash" in manifest_entries[0]
+
+
+def test_selfplay_deduplicates_identical_sequences(monkeypatch, tmp_path: Path) -> None:
+    def fake_search(self, board: chess.Board, *, add_noise: bool = True) -> Dict[chess.Move, int]:
+        move = next(iter(board.legal_moves))
+        return {move: 1}
+
+    monkeypatch.setattr("chessref.train.selfplay.MCTS.search", fake_search, raising=False)
+
+    output = tmp_path / "pgn"
+    dataset_dir = tmp_path / "data"
+    manifest_path = tmp_path / "manifest.json"
+    cfg = SelfPlayConfig(
+        model=ModelConfig(num_moves=4672, d_model=32, nhead=4, depth=1, dim_feedforward=64, dropout=0.0, use_act=False),
+        checkpoint=None,
+        num_games=1,
+        max_moves=3,
+        output_pgn=str(output),
+        output_dataset=str(dataset_dir),
+        output_manifest=str(manifest_path),
+        device="cpu",
+        inference_max_loops=1,
+        temperature=0.0,
+        mcts_num_simulations=4,
+        mcts_dirichlet_epsilon=0.0,
+        train_after=False,
+        train_every_batches=1,
+        run_forever=False,
+        max_batches=None,
+    )
+
+    generate_selfplay_games(cfg)
+    manifest_entries = _load_manifest(manifest_path)
+    assert len(manifest_entries) == 1
+    first_dataset = Path(manifest_entries[0]["dataset"])
+    assert first_dataset.exists()
+    first_line_hash = manifest_entries[0]["line_hash"]
+
+    generate_selfplay_games(cfg)
+    manifest_entries = _load_manifest(manifest_path)
+    assert len(manifest_entries) == 1
+    second_dataset = Path(manifest_entries[0]["dataset"])
+    assert second_dataset.exists()
+    assert second_dataset != first_dataset
+    assert not first_dataset.exists()
+    assert manifest_entries[0]["line_hash"] == first_line_hash
