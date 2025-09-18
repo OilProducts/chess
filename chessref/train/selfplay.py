@@ -539,6 +539,7 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
                         "pgn": str(pgn_file),
                         "num_samples": len(game_samples),
                         "num_plies": move_count,
+                        "result": result,
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                     }
                     manifest_entries.append(entry)
