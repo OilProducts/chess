@@ -451,13 +451,13 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
                     print(
                         f"[selfplay] Warning: failed to set Stockfish skill level to {cfg.stockfish.skill_level}; using default"
                     )
-            opponent_limit_kwargs: Dict[str, int] = {}
+            opponent_limit_kwargs: Dict[str, float | int] = {}
             if cfg.stockfish.depth is not None:
                 opponent_limit_kwargs["depth"] = cfg.stockfish.depth
             if cfg.stockfish.nodes is not None:
                 opponent_limit_kwargs["nodes"] = cfg.stockfish.nodes
             if cfg.stockfish.movetime is not None:
-                opponent_limit_kwargs["movetime"] = cfg.stockfish.movetime
+                opponent_limit_kwargs["time"] = cfg.stockfish.movetime / 1000.0
             opponent_limit = chess.engine.Limit(**opponent_limit_kwargs)
         except FileNotFoundError:
             print(f"[selfplay] Warning: stockfish engine path {cfg.stockfish.engine_path} not found; disabling opponent")
