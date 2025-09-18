@@ -138,12 +138,15 @@ class MCTS:
                 torch.full((len(root.children),), self.cfg.dirichlet_alpha)
             ).sample().tolist()
             for noise_val, child in zip(noise, root.children.values()):
+                # Blend policy prior with root noise so self-play explores alternate moves.
                 child.prior = child.prior * (1 - self.cfg.dirichlet_epsilon) + noise_val * self.cfg.dirichlet_epsilon
 
         total_eval_time = 0.0
         total_eval_positions = 0
         eval_batches = 0
 
+        # `pending` holds leaf evaluations waiting to be backed up; `leaf_tasks` stores
+        # boards queued for batched network inference so we amortise model calls.
         pending: List[Tuple[_SimulationTask, float]] = []
         leaf_tasks: List[_SimulationTask] = []
 
@@ -189,6 +192,7 @@ class MCTS:
                 task, leaf_value = pending.pop()
                 value_to_propagate = leaf_value
                 for n in reversed(task.path):
+                    # Flip the value each ply so parent nodes see the opponent's score.
                     n.visit_count += 1
                     n.value_sum += value_to_propagate
                     value_to_propagate = -value_to_propagate
@@ -248,6 +252,7 @@ class MCTS:
 
     @torch.no_grad()
     def _evaluate_many(self, boards: Sequence[chess.Board]) -> Tuple[List[Dict[chess.Move, float]], List[float]]:
+        # Vectorise evaluation so the network sees several leaves per forward pass.
         planes = torch.stack([board_to_planes(b) for b in boards]).to(self.device)
         legal_masks = torch.stack([legal_move_mask(b) for b in boards]).to(self.device)
         result = refine_predict(
