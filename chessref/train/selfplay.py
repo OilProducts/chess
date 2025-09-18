@@ -515,11 +515,11 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
                         move_count += 1
                         continue
 
-                        is_opening = move_count < cfg.opening_moves
-                        search_temperature = cfg.opening_temperature if is_opening else cfg.temperature
-                        search_epsilon = cfg.opening_dirichlet_epsilon if is_opening else cfg.mcts_dirichlet_epsilon
+                    is_opening = move_count < cfg.opening_moves
+                    search_temperature = cfg.opening_temperature if is_opening else cfg.temperature
+                    search_epsilon = cfg.opening_dirichlet_epsilon if is_opening else cfg.mcts_dirichlet_epsilon
 
-                        original_epsilon = mcts.cfg.dirichlet_epsilon
+                    original_epsilon = mcts.cfg.dirichlet_epsilon
                     mcts.cfg.dirichlet_epsilon = search_epsilon
                     visit_counts_dict = mcts.search(board, add_noise=True)
                     mcts.cfg.dirichlet_epsilon = original_epsilon
