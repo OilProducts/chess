@@ -12,6 +12,7 @@ num_games: 10
 max_moves: 200
 output_pgn: data/selfplay/selfplay.pgn
 output_dataset: data/selfplay/selfplay.pt
+output_manifest: data/selfplay/manifest.json
 device: auto
 inference_max_loops: 4
 temperature: 0.1
@@ -19,7 +20,7 @@ mcts_num_simulations: 256
 mcts_c_puct: 1.5
 mcts_dirichlet_alpha: 0.3
 mcts_dirichlet_epsilon: 0.05
-mcts_eval_batch_size: 16
+mcts_eval_batch_size: 256
 train_after: true
 train_config: configs/train.yaml
 eval_engine_path: "/home/charizard/Downloads/stockfish-ubuntu-x86-64-avx512/stockfish/stockfish-ubuntu-x86-64-avx512"
@@ -31,8 +32,7 @@ eval_print_moves: false
 eval_summary_thresholds:
   mistake: 50
   blunder: 150
-max_datasets: 30
+max_positions: 200000
 train_every_batches: 1
 run_forever: true
 max_batches: null
-max_pgn_games: 1000

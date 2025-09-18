@@ -24,7 +24,7 @@ Supervised training consumes PGNs (human games, engine matches, or self-play log
 ## Config Files
 
 - `configs/train.yaml` controls the supervised trainer (`chessref.train.train_supervised`). It covers data sources, optimizer settings, logging, and device targeting for gradient updates.
-- `configs/selfplay.yaml` feeds the self-play generator (`chessref.train.selfplay`). It defines the rollout model, MCTS parameters, dataset/PGN outputs, and optional handoff into training or Stockfish evals.
+- `configs/selfplay.yaml` feeds the self-play generator (`chessref.train.selfplay`). It defines the rollout model, MCTS parameters, per-game PGN/tensor output locations, manifest pruning rules, and optional handoff into training or Stockfish evals.
 - `configs/eval.yaml` configures policy evaluation (`chessref.eval.eval_policy`). It specifies held-out PGNs, inference loop settings, and checkpoints for offline accuracy reports.
 - `configs/match.yaml` drives lightweight match play (`chessref.eval.eval_match`). It sets the opponent type, match length, inference budget, and device used for head-to-head smoke tests.
 
@@ -54,8 +54,9 @@ Stage 10 introduces a self-play generator so you can bootstrap data without Stoc
 python -m chessref.train.selfplay --config configs/selfplay.yaml \
   checkpoint=checkpoints/step_5000.pt \
   num_games=50 max_moves=160 \
-  output_pgn=data/selfplay/selfplay_50games.pgn \
-  output_dataset=data/selfplay/selfplay_50games.pt \
+  output_pgn=data/selfplay/games \
+  output_dataset=data/selfplay/datasets \
+  output_manifest=data/selfplay/manifest.json \
   temperature=0.8
 ```
 
@@ -67,22 +68,21 @@ To see Stockfish feedback during generation, set `eval_engine_path` (and optiona
 
 Enable per-move logging by setting `eval_print_moves=true` to see lines such as `model=e2e4 best=e2e4 model_cp=12.0 best_cp=12.0 cp_loss=0.0`.
 
-The command writes a PGN containing the requested number of self-play games **and** a tensor dataset with visit-count policy targets. Feed these back into supervised training by pointing `data.selfplay_datasets` (and optionally `data.pgn_paths`) at the generated files:
+Each game produces a timestamped PGN alongside a `.pt` tensor snapshot plus a manifest entry recording sample counts. Feed these back into supervised training by pointing `data.selfplay_datasets` (and optionally `data.pgn_paths`) at the manifest-listed tensor files (e.g., `jq -r '.[].dataset' data/selfplay/manifest.json` to enumerate them):
 
 ```bash
 python -m chessref.train.train_supervised --config configs/train.yaml \
-  data.selfplay_datasets='["data/selfplay/selfplay_50games.pt"]' \
+  data.selfplay_datasets='["data/selfplay/datasets/<game_id>.pt"]' \
   data.pgn_paths=[]
 ```
 
 The `.pt` tensor datasets are pickled lists of `TrainingSample` objects. Each sample stores the encoded board planes, the normalised policy target (visit-count distribution from MCTS), the eventual game result for the side to move, and lightweight metadata (FEN, ply, game index). When you add these files to `data.selfplay_datasets`, the supervised trainer loads them directly into PyTorch without re-parsing PGNs, so new self-play batches can be recycled into training almost immediately.
 
 Additional knobs (see `configs/selfplay.yaml`):
-- `max_datasets`: cap how many recent self-play batches to retain (older `.pt` files are deleted).
+- `max_positions`: prune the oldest self-play games once the manifest exceeds this many training samples; PGN/`.pt` pairs are removed together.
 - `train_every_batches`: run supervised training every N batches when `train_after=true`.
 - `run_forever`/`max_batches`: continuously generate batches until interrupted (useful for automation).
 - `eval_summary_thresholds`: configure cp-loss cutoffs that will be counted in the per-game summary (e.g., mistakes/blunders).
-- `max_pgn_games`: keep at most N recent self-play games on disk; older PGN files are pruned automatically.
 
 ## Evaluation & Matches
 

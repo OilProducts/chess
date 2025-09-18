@@ -28,6 +28,25 @@ class MCTSConfig:
     eval_batch_size: int = 1
 
 
+@dataclass
+class MCTSTimingSummary:
+    batches: int
+    positions: int
+    total_time: float
+
+    @property
+    def avg_batch_ms(self) -> float:
+        if self.batches == 0:
+            return 0.0
+        return (self.total_time / self.batches) * 1000.0
+
+    @property
+    def avg_position_ms(self) -> float:
+        if self.positions == 0:
+            return 0.0
+        return (self.total_time / self.positions) * 1000.0
+
+
 class _Node:
     __slots__ = ("parent", "move", "prior", "visit_count", "value_sum", "children")
 
@@ -79,6 +98,31 @@ class MCTS:
         self.model = model
         self.cfg = config or MCTSConfig()
         self.device = device or next(model.parameters()).device
+        self._reset_timing_stats()
+
+    def _reset_timing_stats(self) -> None:
+        self._total_eval_time = 0.0
+        self._total_eval_positions = 0
+        self._eval_batches = 0
+
+    def reset_timing_stats(self) -> None:
+        """Clear accumulated evaluation timing statistics."""
+
+        self._reset_timing_stats()
+
+    def pop_timing_summary(self) -> Optional[MCTSTimingSummary]:
+        """Return and clear the aggregated timing statistics for recent searches."""
+
+        if self._eval_batches == 0:
+            self._reset_timing_stats()
+            return None
+        summary = MCTSTimingSummary(
+            batches=self._eval_batches,
+            positions=self._total_eval_positions,
+            total_time=self._total_eval_time,
+        )
+        self._reset_timing_stats()
+        return summary
 
     @torch.no_grad()
     def search(self, board: chess.Board, *, add_noise: bool = True) -> Dict[chess.Move, int]:
@@ -151,13 +195,9 @@ class MCTS:
 
         visit_counts: Dict[chess.Move, int] = {move: child.visit_count for move, child in root.children.items()}
 
-        if total_eval_positions > 0:
-            avg_batch_ms = (total_eval_time / max(1, eval_batches)) * 1000.0
-            avg_pos_ms = (total_eval_time / total_eval_positions) * 1000.0
-            print(
-                f"[mcts] batches={eval_batches} positions={total_eval_positions} "
-                f"avg_batch_ms={avg_batch_ms:.2f} avg_pos_ms={avg_pos_ms:.3f}"
-            )
+        self._total_eval_time += total_eval_time
+        self._total_eval_positions += total_eval_positions
+        self._eval_batches += eval_batches
 
         return visit_counts
 
@@ -243,4 +283,4 @@ class MCTS:
         return priors_list, values
 
 
-__all__ = ["MCTS", "MCTSConfig"]
+__all__ = ["MCTS", "MCTSConfig", "MCTSTimingSummary"]

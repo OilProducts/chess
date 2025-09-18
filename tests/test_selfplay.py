@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 from typing import List
 
@@ -20,22 +21,30 @@ from chessref.train.train_supervised import (
 from chessref.moves.encoding import NUM_MOVES
 
 
+def _load_manifest(path: Path) -> List[dict]:
+    with path.open("r", encoding="utf-8") as handle:
+        data = json.load(handle)
+    assert isinstance(data, list)
+    return data
+
+
 def test_generate_selfplay_games(tmp_path: Path) -> None:
-    output = tmp_path / "out.pgn"
-    dataset_path = tmp_path / "data.pt"
+    output = tmp_path / "pgn"
+    dataset_dir = tmp_path / "datasets"
+    manifest_path = tmp_path / "manifest.json"
     cfg = SelfPlayConfig(
         model=ModelConfig(num_moves=4672, d_model=32, nhead=4, depth=1, dim_feedforward=64, dropout=0.0, use_act=False),
         checkpoint=None,
         num_games=1,
         max_moves=10,
         output_pgn=str(output),
-        output_dataset=str(dataset_path),
+        output_dataset=str(dataset_dir),
+        output_manifest=str(manifest_path),
         device="cpu",
         inference_max_loops=1,
         temperature=1.0,
         mcts_num_simulations=8,
         train_after=False,
-        max_datasets=None,
         train_every_batches=1,
         run_forever=False,
         max_batches=None,
@@ -45,9 +54,14 @@ def test_generate_selfplay_games(tmp_path: Path) -> None:
     assert path.exists()
     content = path.read_text().strip()
     assert "Result" in content
+    manifest_entries = _load_manifest(manifest_path)
+    assert len(manifest_entries) == 1
+    dataset_path = Path(manifest_entries[0]["dataset"])
     assert dataset_path.exists()
     samples = torch.load(dataset_path, weights_only=False)
     assert samples
+    pgn_entry = Path(manifest_entries[0]["pgn"])
+    assert pgn_entry.exists()
 
 
 def test_generate_selfplay_games_triggers_training(monkeypatch, tmp_path: Path) -> None:
@@ -81,31 +95,38 @@ def test_generate_selfplay_games_triggers_training(monkeypatch, tmp_path: Path) 
     monkeypatch.setattr("chessref.train.selfplay.train", fake_train)
     monkeypatch.setattr("chessref.train.selfplay.load_train_config", fake_load_config)
 
-    output = tmp_path / "out.pgn"
-    dataset_path = tmp_path / "data.pt"
+    output = tmp_path / "out"
+    dataset_dir = tmp_path / "data"
+    manifest_path = tmp_path / "manifest.json"
     cfg = SelfPlayConfig(
         model=ModelConfig(num_moves=4672, d_model=32, nhead=4, depth=1, dim_feedforward=64, dropout=0.0, use_act=False),
         checkpoint=None,
         num_games=1,
-        max_moves=5,
+        max_moves=1,
         output_pgn=str(output),
-        output_dataset=str(dataset_path),
+        output_dataset=str(dataset_dir),
+        output_manifest=str(manifest_path),
         device="cpu",
         inference_max_loops=1,
         temperature=1.0,
         mcts_num_simulations=4,
         train_after=True,
         train_config=str(tmp_path / "train.yaml"),
-        max_datasets=None,
         train_every_batches=1,
         run_forever=False,
         max_batches=None,
     )
 
-    generate_selfplay_games(cfg)
+    result = generate_selfplay_games(cfg)
     assert "cfg" in train_called
-    assert dataset_path.exists()
-    assert dataset_path.as_posix() in train_called["cfg"].data.selfplay_datasets
+    manifest_entries = _load_manifest(manifest_path)
+    datasets_in_manifest = [entry["dataset"] for entry in manifest_entries]
+    assert datasets_in_manifest
+    for dataset_path in datasets_in_manifest:
+        assert Path(dataset_path).exists()
+    # ensure training consumed the most recent dataset(s)
+    assert set(datasets_in_manifest).issubset(set(train_called["cfg"].data.selfplay_datasets))
+    assert Path(result).exists()
 
 
 def test_generate_selfplay_games_stockfish_eval(monkeypatch, tmp_path: Path) -> None:
@@ -132,15 +153,15 @@ def test_generate_selfplay_games_stockfish_eval(monkeypatch, tmp_path: Path) -> 
 
     monkeypatch.setattr("chess.engine.SimpleEngine.popen_uci", lambda path: FakeEngine())
 
-    output = tmp_path / "out.pgn"
-    dataset_path = tmp_path / "data.pt"
+    output = tmp_path / "out"
+    dataset_dir = tmp_path / "data"
     cfg = SelfPlayConfig(
         model=ModelConfig(num_moves=4672, d_model=32, nhead=4, depth=1, dim_feedforward=64, dropout=0.0, use_act=False),
         checkpoint=None,
         num_games=1,
         max_moves=3,
         output_pgn=str(output),
-        output_dataset=str(dataset_path),
+        output_dataset=str(dataset_dir),
         device="cpu",
         inference_max_loops=1,
         temperature=1.0,
@@ -149,7 +170,6 @@ def test_generate_selfplay_games_stockfish_eval(monkeypatch, tmp_path: Path) -> 
         eval_engine_path="fake",
         eval_depth=1,
         eval_multipv=2,
-        max_datasets=None,
         train_every_batches=1,
         run_forever=False,
         max_batches=None,
@@ -190,22 +210,23 @@ def test_selfplay_respects_dataset_limit(monkeypatch, tmp_path: Path) -> None:
     monkeypatch.setattr("chessref.train.selfplay.train", fake_train)
     monkeypatch.setattr("chessref.train.selfplay.load_train_config", fake_load_config)
 
-    output = tmp_path / "out.pgn"
-    dataset = tmp_path / "data.pt"
+    output = tmp_path / "pgn"
+    dataset_dir = tmp_path / "data"
+    manifest_path = tmp_path / "manifest.json"
     cfg = SelfPlayConfig(
         model=ModelConfig(num_moves=4672, d_model=32, nhead=4, depth=1, dim_feedforward=64, dropout=0.0, use_act=False),
         checkpoint=None,
         num_games=1,
         max_moves=3,
         output_pgn=str(output),
-        output_dataset=str(dataset),
+        output_dataset=str(dataset_dir),
+        output_manifest=str(manifest_path),
         device="cpu",
         inference_max_loops=1,
         temperature=1.0,
         mcts_num_simulations=4,
         train_after=True,
         train_config=str(tmp_path / "train.yaml"),
-        max_datasets=1,
         train_every_batches=1,
         run_forever=True,
         max_batches=2,
@@ -214,37 +235,44 @@ def test_selfplay_respects_dataset_limit(monkeypatch, tmp_path: Path) -> None:
     generate_selfplay_games(cfg)
 
     assert len(train_calls) == 2
-    assert all(len(call) == 1 for call in train_calls)
-    old_dataset = dataset.with_name(f"{dataset.stem}_b0{dataset.suffix}")
-    new_dataset = dataset.with_name(f"{dataset.stem}_b1{dataset.suffix}")
-    assert not old_dataset.exists()
-    assert new_dataset.exists()
+    manifest_entries = _load_manifest(manifest_path)
+    datasets = [entry["dataset"] for entry in manifest_entries]
+    assert len(datasets) == 2
+    # First training pass sees only the first dataset
+    assert train_calls[0] == [datasets[0]]
+    # Second training pass includes both existing datasets (newest last)
+    assert train_calls[1] == datasets
+    for path_str in datasets:
+        assert Path(path_str).exists()
 
 
 def test_selfplay_prunes_old_pgns(tmp_path: Path) -> None:
-    output = tmp_path / "selfplay.pgn"
-    dataset_path = tmp_path / "data.pt"
+    output = tmp_path / "selfplay"
+    dataset_dir = tmp_path / "data"
+    manifest_path = tmp_path / "manifest.json"
     cfg = SelfPlayConfig(
         model=ModelConfig(num_moves=4672, d_model=32, nhead=4, depth=1, dim_feedforward=64, dropout=0.0, use_act=False),
         checkpoint=None,
         num_games=1,
-        max_moves=5,
+        max_moves=1,
         output_pgn=str(output),
-        output_dataset=str(dataset_path),
+        output_dataset=str(dataset_dir),
+        output_manifest=str(manifest_path),
         device="cpu",
         inference_max_loops=1,
         temperature=1.0,
         mcts_num_simulations=4,
         train_after=False,
-        max_datasets=None,
         train_every_batches=1,
         run_forever=True,
         max_batches=2,
-        max_pgn_games=1,
+        max_positions=1,
     )
 
     generate_selfplay_games(cfg)
 
-    pgn_files = sorted(tmp_path.glob("selfplay_*.pgn"))
-    assert len(pgn_files) == 1
-    assert pgn_files[0].name.endswith("_b1.pgn")
+    manifest_entries = _load_manifest(manifest_path)
+    assert len(manifest_entries) == 1
+    remaining_pgn = Path(manifest_entries[0]["pgn"])
+    assert remaining_pgn.exists()
+    assert "g00002" in remaining_pgn.name

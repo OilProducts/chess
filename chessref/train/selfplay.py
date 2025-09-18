@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -166,6 +168,7 @@ class SelfPlayConfig:
     max_moves: int = 200
     output_pgn: str = "selfplay.pgn"
     output_dataset: Optional[str] = None
+    output_manifest: Optional[str] = None
     device: str = "auto"
     mcts_num_simulations: int = 128
     mcts_c_puct: float = 1.5
@@ -183,11 +186,10 @@ class SelfPlayConfig:
     eval_multipv: int = 2
     eval_print_moves: bool = False
     eval_summary_thresholds: Optional[Dict[str, float]] = None
-    max_datasets: Optional[int] = None
+    max_positions: Optional[int] = None
     train_every_batches: int = 1
     run_forever: bool = False
     max_batches: Optional[int] = None
-    max_pgn_games: Optional[int] = None
 
 
 def _load_config(path: Path) -> SelfPlayConfig:
@@ -196,6 +198,72 @@ def _load_config(path: Path) -> SelfPlayConfig:
     kwargs = OmegaConf.to_object(cfg)
     kwargs.pop("model")
     return SelfPlayConfig(model=model, **kwargs)
+
+
+def _load_manifest(path: Path) -> List[dict[str, object]]:
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8") as handle:
+        try:
+            data = json.load(handle)
+        except json.JSONDecodeError:
+            return []
+    if not isinstance(data, list):
+        return []
+    return data
+
+
+def _save_manifest(path: Path, entries: List[dict[str, object]]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        json.dump(entries, handle, indent=2)
+
+
+def _remove_game_files(entry: dict[str, object]) -> None:
+    dataset_path = entry.get("dataset")
+    pgn_path = entry.get("pgn")
+    if isinstance(dataset_path, str):
+        try:
+            Path(dataset_path).unlink()
+            print(f"[selfplay] Removed stale dataset {dataset_path}")
+        except FileNotFoundError:
+            pass
+    if isinstance(pgn_path, str):
+        try:
+            Path(pgn_path).unlink()
+            print(f"[selfplay] Removed stale PGN {pgn_path}")
+        except FileNotFoundError:
+            pass
+
+
+def _game_files_exist(entry: dict[str, object]) -> bool:
+    dataset_path = entry.get("dataset")
+    pgn_path = entry.get("pgn")
+    dataset_ok = isinstance(dataset_path, str) and Path(dataset_path).exists()
+    pgn_ok = isinstance(pgn_path, str) and Path(pgn_path).exists()
+    return dataset_ok and pgn_ok
+
+
+def _prune_manifest(
+    entries: List[dict[str, object]],
+    *,
+    max_positions: Optional[int],
+) -> List[dict[str, object]]:
+    def total_positions(items: List[dict[str, object]]) -> int:
+        return sum(int(entry.get("num_samples", 0)) for entry in items)
+
+    changed = False
+
+    if max_positions is not None:
+        while entries and total_positions(entries) > max_positions:
+            removed = entries.pop(0)
+            _remove_game_files(removed)
+            changed = True
+
+    if changed:
+        entries[:] = [entry for entry in entries if _game_files_exist(entry)]
+
+    return entries
 
 
 def _build_model(model_cfg: ModelConfig, device: torch.device) -> IterativeRefiner:
@@ -254,14 +322,6 @@ def _result_value(board: chess.Board, for_white: bool) -> float:
     return 0.5
 
 
-def _format_batch_path(base: Optional[Path], batch_index: int, run_forever: bool) -> Optional[Path]:
-    if base is None:
-        return None
-    if batch_index == 0 and not run_forever:
-        return base
-    stem = base.stem
-    suffix = base.suffix
-    return base.with_name(f"{stem}_b{batch_index}{suffix}")
 
 
 def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
@@ -285,12 +345,51 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
         device=device,
     )
 
-    output_base = Path(cfg.output_pgn)
-    output_base.parent.mkdir(parents=True, exist_ok=True)
+    pgn_base_path = Path(cfg.output_pgn)
+    if pgn_base_path.suffix:
+        pgn_dir = pgn_base_path.parent
+        pgn_stem = pgn_base_path.stem
+        pgn_suffix = pgn_base_path.suffix or ".pgn"
+    else:
+        pgn_dir = pgn_base_path
+        pgn_stem = pgn_base_path.name
+        pgn_suffix = ".pgn"
+    pgn_dir.mkdir(parents=True, exist_ok=True)
 
-    dataset_base = Path(cfg.output_dataset) if cfg.output_dataset else None
-    if dataset_base is not None:
-        dataset_base.parent.mkdir(parents=True, exist_ok=True)
+    dataset_base_path = Path(cfg.output_dataset) if cfg.output_dataset else None
+    if dataset_base_path is not None and dataset_base_path.suffix:
+        dataset_dir = dataset_base_path.parent
+        dataset_stem = dataset_base_path.stem
+        dataset_suffix = dataset_base_path.suffix or ".pt"
+    elif dataset_base_path is not None:
+        dataset_dir = dataset_base_path
+        dataset_stem = dataset_base_path.name
+        dataset_suffix = ".pt"
+    else:
+        dataset_dir = None
+        dataset_stem = None
+        dataset_suffix = None
+    if dataset_dir is not None:
+        dataset_dir.mkdir(parents=True, exist_ok=True)
+
+    if cfg.output_manifest:
+        manifest_path = Path(cfg.output_manifest)
+    elif dataset_dir is not None:
+        manifest_path = dataset_dir / "manifest.json"
+    else:
+        manifest_path = pgn_dir / "manifest.json"
+
+    manifest_entries = _load_manifest(manifest_path)
+    manifest_entries = [entry for entry in manifest_entries if _game_files_exist(entry)]
+    if cfg.max_positions is not None:
+        manifest_entries = _prune_manifest(
+            manifest_entries,
+            max_positions=cfg.max_positions,
+        )
+    if manifest_entries:
+        _save_manifest(manifest_path, manifest_entries)
+
+    dataset_paths: List[str] = [str(entry["dataset"]) for entry in manifest_entries if "dataset" in entry]
 
     engine: Optional[chess.engine.SimpleEngine] = None
     limit: Optional[chess.engine.Limit] = None
@@ -306,147 +405,157 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
             limit_kwargs["movetime"] = cfg.eval_movetime
         limit = chess.engine.Limit(**limit_kwargs)
 
-    dataset_paths: List[str] = []
-    pgn_history: List[Tuple[str, int]] = []
     batch_index = 0
-    last_pgn = output_base
+    last_pgn: Optional[Path] = None
 
     try:
         while True:
-            pgn_path = _format_batch_path(output_base, batch_index, cfg.run_forever)
-            dataset_path = (
-                _format_batch_path(dataset_base, batch_index, cfg.run_forever)
-                if dataset_base is not None
-                else None
-            )
+            games_in_batch = 0
+            for game_idx in range(cfg.num_games):
+                global_game = batch_index * cfg.num_games + game_idx + 1
+                print(f"[selfplay] Generating game {global_game} (batch {batch_index + 1})...")
+                board = chess.Board()
+                game = chess.pgn.Game()
+                node = game
+                move_count = 0
+                episode_records: List[dict] = []
+                game_evals: List[StockfishEval] = []
+                game_samples: List[TrainingSample] = []
+                mcts.reset_timing_stats()
 
-            dataset: List[TrainingSample] = []
-            with pgn_path.open("w", encoding="utf-8") as handle:
-                games_in_batch = 0
-                for game_idx in range(cfg.num_games):
-                    global_game = batch_index * cfg.num_games + game_idx + 1
-                    print(f"[selfplay] Generating game {global_game} (batch {batch_index + 1})...")
-                    board = chess.Board()
-                    game = chess.pgn.Game()
-                    node = game
-                    move_count = 0
-                    episode_records: List[dict] = []
-                    game_evals: List[StockfishEval] = []
+                while not board.is_game_over(claim_draw=True) and move_count < cfg.max_moves:
+                    visit_counts_dict = mcts.search(board, add_noise=True)
+                    visit_tensor = torch.zeros(NUM_MOVES, dtype=torch.float32)
+                    for move, visits in visit_counts_dict.items():
+                        idx = encode_move(move, board)
+                        visit_tensor[idx] = float(visits)
 
-                    while not board.is_game_over(claim_draw=True) and move_count < cfg.max_moves:
-                        visit_counts_dict = mcts.search(board, add_noise=True)
-                        visit_tensor = torch.zeros(NUM_MOVES, dtype=torch.float32)
-                        for move, visits in visit_counts_dict.items():
-                            idx = encode_move(move, board)
-                            visit_tensor[idx] = float(visits)
+                    move_index = _select_move(visit_tensor, cfg.temperature)
+                    chosen_move: Optional[chess.Move] = None
+                    for move in board.legal_moves:
+                        if encode_move(move, board) == move_index:
+                            chosen_move = move
+                            break
+                    if chosen_move is None:
+                        chosen_move = max(visit_counts_dict.items(), key=lambda item: item[1])[0]
 
-                        move_index = _select_move(visit_tensor, cfg.temperature)
-                        chosen_move: Optional[chess.Move] = None
-                        for move in board.legal_moves:
-                            if encode_move(move, board) == move_index:
-                                chosen_move = move
-                                break
-                        if chosen_move is None:
-                            chosen_move = max(visit_counts_dict.items(), key=lambda item: item[1])[0]
-
-                        if engine is not None and limit is not None:
-                            eval_result = _evaluate_stockfish_move(
-                                engine,
-                                limit,
-                                board.copy(stack=False),
-                                chosen_move,
-                                multipv,
-                            )
-                            game_evals.append(eval_result)
-                            if cfg.eval_print_moves:
-                                print(
-                                    f"[selfplay] batch={batch_index + 1} game={global_game} ply={move_count + 1} "
-                                    f"model={chosen_move.uci()} best={eval_result.best_move.uci()} "
-                                    f"model_cp={eval_result.model_cp:.1f} best_cp={eval_result.best_cp:.1f} "
-                                    f"cp_loss={eval_result.cp_loss:.1f}"
-                                )
-
-                        episode_records.append(
-                            {
-                                "fen": board.fen(),
-                                "policy": visit_tensor.clone(),
-                                "move": chosen_move.uci(),
-                                "game_index": game_idx,
-                                "ply": move_count,
-                                "turn": board.turn,
-                            }
+                    if engine is not None and limit is not None:
+                        eval_result = _evaluate_stockfish_move(
+                            engine,
+                            limit,
+                            board.copy(stack=False),
+                            chosen_move,
+                            multipv,
                         )
+                        game_evals.append(eval_result)
+                        if cfg.eval_print_moves:
+                            print(
+                                f"[selfplay] batch={batch_index + 1} game={global_game} ply={move_count + 1} "
+                                f"model={chosen_move.uci()} best={eval_result.best_move.uci()} "
+                                f"model_cp={eval_result.model_cp:.1f} best_cp={eval_result.best_cp:.1f} "
+                                f"cp_loss={eval_result.cp_loss:.1f}"
+                            )
 
-                        board.push(chosen_move)
-                        node = node.add_variation(chosen_move)
-                        move_count += 1
+                    episode_records.append(
+                        {
+                            "fen": board.fen(),
+                            "policy": visit_tensor.clone(),
+                            "move": chosen_move.uci(),
+                            "game_index": global_game,
+                            "ply": move_count,
+                            "turn": board.turn,
+                        }
+                    )
 
-                    result = board.result(claim_draw=True)
-                    game.headers["Result"] = result
+                    board.push(chosen_move)
+                    node = node.add_variation(chosen_move)
+                    move_count += 1
+
+                result = board.result(claim_draw=True)
+                game.headers["Result"] = result
+                timing_summary = mcts.pop_timing_summary()
+                timing_suffix = ""
+                if timing_summary is not None:
+                    timing_suffix = (
+                        f" mcts_batches={timing_summary.batches}"
+                        f" mcts_positions={timing_summary.positions}"
+                        f" mcts_avg_batch_ms={timing_summary.avg_batch_ms:.2f}"
+                        f" mcts_avg_pos_ms={timing_summary.avg_position_ms:.3f}"
+                    )
+
+                for record in episode_records:
+                    value = _result_value(board, for_white=(record["turn"]))
+                    metadata = PositionRecord(
+                        fen=record["fen"],
+                        move_uci=record["move"],
+                        white_result=_result_value(board, True),
+                        ply=record["ply"],
+                        game_index=record["game_index"],
+                    )
+                    planes = board_to_planes(chess.Board(record["fen"]))
+                    policy = record["policy"]
+                    total_visits = policy.sum()
+                    if total_visits > 0:
+                        policy = policy / total_visits
+                    game_samples.append(
+                        TrainingSample(
+                            planes=planes,
+                            policy=policy,
+                            value=torch.tensor(value, dtype=torch.float32),
+                            metadata=metadata,
+                        )
+                    )
+
+                timestamp = datetime.utcnow().strftime("%Y%m%dT%H%M%S")
+                unique_id = f"{timestamp}_g{global_game:05d}"
+                pgn_file = pgn_dir / f"{pgn_stem}_{unique_id}{pgn_suffix}"
+                with pgn_file.open("w", encoding="utf-8") as handle:
                     handle.write(str(game) + "\n\n")
-                    if game_evals:
-                        summary = _summarize_stockfish_evals(game_evals, cfg.eval_summary_thresholds)
-                        print(
-                            f"[selfplay] Game {global_game} finished result={result} plies={move_count} "
-                            f"evaluated={len(game_evals)} {summary}"
-                        )
-                    else:
-                        print(f"[selfplay] Game {global_game} finished result={result} plies={move_count}")
 
-                    for record in episode_records:
-                        value = _result_value(board, for_white=(record["turn"]))
-                        metadata = PositionRecord(
-                            fen=record["fen"],
-                            move_uci=record["move"],
-                            white_result=_result_value(board, True),
-                            ply=record["ply"],
-                            game_index=batch_index,
-                        )
-                        planes = board_to_planes(chess.Board(record["fen"]))
-                        policy = record["policy"]
-                        total_visits = policy.sum()
-                        if total_visits > 0:
-                            policy = policy / total_visits
-                        dataset.append(
-                            TrainingSample(
-                                planes=planes,
-                                policy=policy,
-                                value=torch.tensor(value, dtype=torch.float32),
-                                metadata=metadata,
-                            )
-                        )
+                dataset_file: Optional[Path] = None
+                if dataset_dir is not None and dataset_stem is not None and dataset_suffix is not None:
+                    dataset_file = dataset_dir / f"{dataset_stem}_{unique_id}{dataset_suffix}"
+                    torch.save(game_samples, dataset_file)
+                    print(f"[selfplay] Saved {len(game_samples)} training samples to {dataset_file}")
 
-                    games_in_batch += 1
+                if game_evals:
+                    summary = _summarize_stockfish_evals(game_evals, cfg.eval_summary_thresholds)
+                    print(
+                        f"[selfplay] Game {global_game} finished result={result} plies={move_count} "
+                        f"evaluated={len(game_evals)} {summary}{timing_suffix}"
+                    )
+                else:
+                    print(
+                        f"[selfplay] Game {global_game} finished result={result} plies={move_count}"
+                        f"{timing_suffix}"
+                    )
 
-            if dataset_path is not None:
-                torch.save(dataset, dataset_path)
-                dataset_paths.append(str(dataset_path))
-                print(f"[selfplay] Saved {len(dataset)} training samples to {dataset_path}")
-                if cfg.max_datasets is not None and len(dataset_paths) > cfg.max_datasets:
-                    stale = dataset_paths.pop(0)
-                    try:
-                        Path(stale).unlink()
-                        print(f"[selfplay] Removed stale dataset {stale}")
-                    except FileNotFoundError:
-                        pass
+                games_in_batch += 1
+                last_pgn = pgn_file
 
-            if games_in_batch > 0:
-                pgn_history.append((str(pgn_path), games_in_batch))
-                if cfg.max_pgn_games is not None:
-                    _prune_pgn_history(pgn_history, cfg.max_pgn_games)
+                if dataset_file is not None:
+                    entry = {
+                        "dataset": str(dataset_file),
+                        "pgn": str(pgn_file),
+                        "num_samples": len(game_samples),
+                        "num_plies": move_count,
+                        "timestamp": datetime.utcnow().isoformat(),
+                    }
+                    manifest_entries.append(entry)
+                    manifest_entries = _prune_manifest(
+                        manifest_entries,
+                        max_positions=cfg.max_positions,
+                    )
+                    _save_manifest(manifest_path, manifest_entries)
+                    dataset_paths = [str(item["dataset"]) for item in manifest_entries]
 
-            if cfg.train_after and ((batch_index + 1) % max(1, cfg.train_every_batches) == 0):
+            if cfg.train_after and games_in_batch > 0 and dataset_paths:
                 train_cfg_path = Path(cfg.train_config) if cfg.train_config else Path("configs/train.yaml")
                 train_cfg = load_train_config(train_cfg_path)
-                combined = list(train_cfg.data.selfplay_datasets)
-                for path in dataset_paths:
-                    if path not in combined:
-                        combined.append(path)
-                if cfg.max_datasets is not None:
-                    combined = combined[-cfg.max_datasets:]
-                train_cfg.data.selfplay_datasets = combined
+                manifest_datasets = list(dict.fromkeys(dataset_paths))
+                train_cfg.data.selfplay_datasets = manifest_datasets
                 print(
-                    f"[selfplay] Starting supervised training on {len(combined)} datasets (batch {batch_index + 1})"
+                    f"[selfplay] Starting supervised training on {len(train_cfg.data.selfplay_datasets)} datasets (batch {batch_index + 1})"
                 )
                 train(train_cfg)
 
@@ -468,18 +577,16 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
                     )
 
             batch_index += 1
-            last_pgn = pgn_path
 
             if not cfg.run_forever:
                 break
             if cfg.max_batches is not None and batch_index >= cfg.max_batches:
                 break
 
-        return last_pgn
+        return last_pgn if last_pgn is not None else pgn_dir
     finally:
         if engine is not None:
             engine.close()
-
 
 def _print_run_configuration(cfg: SelfPlayConfig) -> None:
     print("[selfplay] Configuration summary:")
@@ -503,11 +610,11 @@ def _print_run_configuration(cfg: SelfPlayConfig) -> None:
     else:
         print("  stockfish: disabled")
     print(
-        f"  datasets: output_dataset={cfg.output_dataset} max_datasets={cfg.max_datasets} "
-        f"train_after={cfg.train_after} train_every_batches={cfg.train_every_batches}"
+        f"  storage: dataset_base={cfg.output_dataset} manifest={cfg.output_manifest} "
+        f"max_positions={cfg.max_positions}"
     )
     print(
-        f"  pgn retention: max_pgn_games={cfg.max_pgn_games} output_pgn={cfg.output_pgn}"
+        f"  pgn: base={cfg.output_pgn}"
     )
     if cfg.run_forever:
         print(
@@ -518,8 +625,9 @@ def _print_run_configuration(cfg: SelfPlayConfig) -> None:
             f"  loop: run_forever=false num_games={cfg.num_games} max_batches={cfg.max_batches}"
         )
     print(
-        f"  checkpoint: checkpoint={cfg.checkpoint} output_dataset={cfg.output_dataset}"
+        f"  training: train_after={cfg.train_after} train_every_batches={cfg.train_every_batches}"
     )
+    print(f"  checkpoint: checkpoint={cfg.checkpoint}")
 
 
 def main(argv: Optional[Sequence[str]] = None) -> None:
@@ -530,8 +638,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     cfg = _load_config(args.config)
     output = generate_selfplay_games(cfg)
     print(f"Self-play games written to {output}")
-    if cfg.output_dataset:
-        print(f"Training samples saved to {cfg.output_dataset}")
+    if cfg.output_manifest:
+        print(f"Manifest updated at {cfg.output_manifest}")
+    elif cfg.output_dataset:
+        print(f"Training samples saved under {cfg.output_dataset}")
 
 
 if __name__ == "__main__":
