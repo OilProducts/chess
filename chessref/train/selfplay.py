@@ -27,6 +27,7 @@ from chessref.train.train_supervised import (
     train,
     _select_device,
 )
+from chessref.utils.checkpoint import load_checkpoint
 
 
 def _score_to_cp(score: chess.engine.Score, mate_value: int = 10000) -> float:
@@ -197,22 +198,39 @@ def _load_config(path: Path) -> SelfPlayConfig:
     return SelfPlayConfig(model=model, **kwargs)
 
 
-def _load_model(cfg: SelfPlayConfig, device: torch.device) -> IterativeRefiner:
+def _build_model(model_cfg: ModelConfig, device: torch.device) -> IterativeRefiner:
     model = IterativeRefiner(
-        num_moves=cfg.model.num_moves,
-        d_model=cfg.model.d_model,
-        nhead=cfg.model.nhead,
-        depth=cfg.model.depth,
-        dim_feedforward=cfg.model.dim_feedforward,
-        dropout=cfg.model.dropout,
-        use_act=cfg.model.use_act,
+        num_moves=model_cfg.num_moves,
+        d_model=model_cfg.d_model,
+        nhead=model_cfg.nhead,
+        depth=model_cfg.depth,
+        dim_feedforward=model_cfg.dim_feedforward,
+        dropout=model_cfg.dropout,
+        use_act=model_cfg.use_act,
     ).to(device)
+    return model
+
+
+def _load_model(cfg: SelfPlayConfig, device: torch.device) -> IterativeRefiner:
+    model = _build_model(cfg.model, device)
     if cfg.checkpoint:
         checkpoint = torch.load(cfg.checkpoint, map_location=device)
         state = checkpoint.get("model", checkpoint)
         model.load_state_dict(state)
     model.eval()
     return model
+
+
+def _latest_iteration_checkpoint(directory: Path) -> Optional[Path]:
+    if not directory.exists():
+        return None
+    iteration_paths = sorted(directory.glob("iteration_*.pt"))
+    if iteration_paths:
+        return iteration_paths[-1]
+    generic_paths = sorted(directory.glob("*.pt"))
+    if generic_paths:
+        return generic_paths[-1]
+    return None
 
 
 def _select_move(visit_counts: torch.Tensor, temperature: float) -> int:
@@ -431,6 +449,23 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
                     f"[selfplay] Starting supervised training on {len(combined)} datasets (batch {batch_index + 1})"
                 )
                 train(train_cfg)
+
+                checkpoint_dir = Path(train_cfg.checkpoint.directory)
+                latest_checkpoint = _latest_iteration_checkpoint(checkpoint_dir)
+                if latest_checkpoint is not None:
+                    print(f"[selfplay] Reloading model from {latest_checkpoint}")
+                    reloaded_model = _build_model(train_cfg.model, device)
+                    checkpoint = load_checkpoint(latest_checkpoint, map_location=device)
+                    reloaded_model.load_state_dict(checkpoint["model"])
+                    reloaded_model.eval()
+                    model = reloaded_model
+                    cfg.model = train_cfg.model
+                    mcts.model = model
+                else:
+                    print(
+                        f"[selfplay] Warning: no checkpoint found in {checkpoint_dir} after training;"
+                        " continuing with previous weights."
+                    )
 
             batch_index += 1
             last_pgn = pgn_path
