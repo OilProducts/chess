@@ -26,6 +26,16 @@ opening_temperature: 0.6
 opening_dirichlet_epsilon: 0.25
 train_after: true
 train_config: configs/train.yaml
+stockfish:
+  enabled: false
+  ratio: 0.0
+  engine_path: null
+  depth: null
+  nodes: null
+  movetime: null
+  skill_level: null
+  play_as_white: true
+  alternate_colors: true
 eval_engine_path: "/home/charizard/Downloads/stockfish-ubuntu-x86-64-avx512/stockfish/stockfish-ubuntu-x86-64-avx512"
 eval_depth: 12
 eval_nodes: null

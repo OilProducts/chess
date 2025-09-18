@@ -83,6 +83,7 @@ Additional knobs (see `configs/selfplay.yaml`):
 - `train_every_batches`: run supervised training every N batches when `train_after=true`.
 - `run_forever`/`max_batches`: continuously generate batches until interrupted (useful for automation).
 - `eval_summary_thresholds`: configure cp-loss cutoffs that will be counted in the per-game summary (e.g., mistakes/blunders).
+- `stockfish`: optional block that enables Stockfish as an opponent. Set `enabled`, choose a `ratio` of games to play against Stockfish, point at `engine_path`, tune depth/nodes/movetime, pick a `skill_level`, and control colour assignment with `play_as_white`/`alternate_colors`.
 
 ## Evaluation & Matches
 

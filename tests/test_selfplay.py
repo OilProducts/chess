@@ -6,7 +6,7 @@ import chess
 import chess.engine
 import torch
 
-from chessref.train.selfplay import SelfPlayConfig, generate_selfplay_games
+from chessref.train.selfplay import SelfPlayConfig, StockfishConfig, generate_selfplay_games
 from chessref.train.train_supervised import (
     ModelConfig,
     TrainConfig,
@@ -326,3 +326,66 @@ def test_selfplay_deduplicates_identical_sequences(monkeypatch, tmp_path: Path) 
     assert second_dataset != first_dataset
     assert not first_dataset.exists()
     assert manifest_entries[0]["line_hash"] == first_line_hash
+
+
+def test_selfplay_with_stockfish_opponent(monkeypatch, tmp_path: Path) -> None:
+    class FakeEngine:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def configure(self, _options: Dict[str, int]) -> None:
+            return None
+
+        def play(self, board: chess.Board, _limit) -> chess.engine.PlayResult:
+            move = next(iter(board.legal_moves))
+            return chess.engine.PlayResult(move=move, ponder=None)
+
+        def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr("chess.engine.SimpleEngine.popen_uci", lambda path: FakeEngine())
+    monkeypatch.setattr("random.random", lambda: 0.0)
+
+    output = tmp_path / "pgn"
+    dataset_dir = tmp_path / "data"
+    manifest_path = tmp_path / "manifest.json"
+    cfg = SelfPlayConfig(
+        model=ModelConfig(num_moves=4672, d_model=32, nhead=4, depth=1, dim_feedforward=64, dropout=0.0, use_act=False),
+        checkpoint=None,
+        num_games=1,
+        max_moves=4,
+        output_pgn=str(output),
+        output_dataset=str(dataset_dir),
+        output_manifest=str(manifest_path),
+        device="cpu",
+        inference_max_loops=1,
+        temperature=0.1,
+        opening_moves=0,
+        mcts_num_simulations=4,
+        stockfish=StockfishConfig(
+            enabled=True,
+            ratio=1.0,
+            engine_path="fake",
+            depth=1,
+            skill_level=5,
+            play_as_white=True,
+            alternate_colors=False,
+        ),
+        train_after=False,
+        train_every_batches=1,
+        run_forever=False,
+        max_batches=None,
+    )
+
+    generate_selfplay_games(cfg)
+
+    manifest_entries = _load_manifest(manifest_path)
+    assert len(manifest_entries) == 1
+    entry = manifest_entries[0]
+    assert entry["result"] in {"1-0", "0-1", "1/2-1/2"}
+    assert "line_hash" in entry
+    dataset_path = Path(entry["dataset"])
+    assert dataset_path.exists()
+    samples = torch.load(dataset_path, weights_only=False)
+    assert len(samples) == entry["num_samples"]
+    assert entry["num_samples"] <= entry["num_plies"]

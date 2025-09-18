@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -15,6 +15,7 @@ import statistics
 import chess
 import chess.pgn
 import chess.engine
+import random
 import torch
 from omegaconf import OmegaConf
 
@@ -162,6 +163,20 @@ def _prune_pgn_history(
             pass
 
 @dataclass
+@dataclass
+class StockfishConfig:
+    enabled: bool = False
+    ratio: float = 0.0
+    engine_path: Optional[str] = None
+    depth: Optional[int] = None
+    nodes: Optional[int] = None
+    movetime: Optional[int] = None
+    skill_level: Optional[int] = None
+    play_as_white: bool = True
+    alternate_colors: bool = True
+
+
+@dataclass
 class SelfPlayConfig:
     model: ModelConfig
     checkpoint: Optional[str] = None
@@ -181,6 +196,7 @@ class SelfPlayConfig:
     opening_moves: int = 12
     opening_temperature: float = 0.6
     opening_dirichlet_epsilon: float = 0.25
+    stockfish: StockfishConfig = field(default_factory=StockfishConfig)
     train_after: bool = False
     train_config: Optional[str] = None
     eval_engine_path: Optional[str] = None
@@ -199,9 +215,11 @@ class SelfPlayConfig:
 def _load_config(path: Path) -> SelfPlayConfig:
     cfg = OmegaConf.load(path)
     model = ModelConfig(**OmegaConf.to_object(cfg.model))
-    kwargs = OmegaConf.to_object(cfg)
-    kwargs.pop("model")
-    return SelfPlayConfig(model=model, **kwargs)
+    cfg_obj = OmegaConf.to_object(cfg)
+    stockfish_raw = cfg_obj.get("stockfish", {})
+    stockfish_cfg = StockfishConfig(**stockfish_raw)
+    kwargs = {k: v for k, v in cfg_obj.items() if k not in {"model", "stockfish"}}
+    return SelfPlayConfig(model=model, stockfish=stockfish_cfg, **kwargs)
 
 
 def _load_manifest(path: Path) -> List[dict[str, object]]:
@@ -417,8 +435,38 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
             limit_kwargs["movetime"] = cfg.eval_movetime
         limit = chess.engine.Limit(**limit_kwargs)
 
+    opponent_engine: Optional[chess.engine.SimpleEngine] = None
+    opponent_limit: Optional[chess.engine.Limit] = None
+    stockfish_enabled = cfg.stockfish.enabled and cfg.stockfish.engine_path is not None
+    if cfg.stockfish.enabled and not cfg.stockfish.engine_path:
+        print("[selfplay] Warning: stockfish.enabled is true but stockfish.engine_path is not set; disabling opponent")
+        stockfish_enabled = False
+    if stockfish_enabled:
+        try:
+            opponent_engine = chess.engine.SimpleEngine.popen_uci(cfg.stockfish.engine_path)
+            if cfg.stockfish.skill_level is not None:
+                try:
+                    opponent_engine.configure({"Skill Level": cfg.stockfish.skill_level})
+                except chess.engine.EngineError:
+                    print(
+                        f"[selfplay] Warning: failed to set Stockfish skill level to {cfg.stockfish.skill_level}; using default"
+                    )
+            opponent_limit_kwargs: Dict[str, int] = {}
+            if cfg.stockfish.depth is not None:
+                opponent_limit_kwargs["depth"] = cfg.stockfish.depth
+            if cfg.stockfish.nodes is not None:
+                opponent_limit_kwargs["nodes"] = cfg.stockfish.nodes
+            if cfg.stockfish.movetime is not None:
+                opponent_limit_kwargs["movetime"] = cfg.stockfish.movetime
+            opponent_limit = chess.engine.Limit(**opponent_limit_kwargs)
+        except FileNotFoundError:
+            print(f"[selfplay] Warning: stockfish engine path {cfg.stockfish.engine_path} not found; disabling opponent")
+            opponent_engine = None
+            stockfish_enabled = False
+
     batch_index = 0
     last_pgn: Optional[Path] = None
+    next_model_plays_white_vs_stockfish = cfg.stockfish.play_as_white
 
     try:
         while True:
@@ -435,12 +483,43 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
                 game_samples: List[TrainingSample] = []
                 mcts.reset_timing_stats()
 
-                while not board.is_game_over(claim_draw=True) and move_count < cfg.max_moves:
-                    is_opening = move_count < cfg.opening_moves
-                    search_temperature = cfg.opening_temperature if is_opening else cfg.temperature
-                    search_epsilon = cfg.opening_dirichlet_epsilon if is_opening else cfg.mcts_dirichlet_epsilon
+                use_stockfish_opponent = False
+                model_plays_white = True
+                if stockfish_enabled and opponent_engine is not None:
+                    ratio = min(max(cfg.stockfish.ratio, 0.0), 1.0)
+                    if ratio >= 1.0:
+                        use_stockfish_opponent = True
+                    elif ratio <= 0.0:
+                        use_stockfish_opponent = False
+                    else:
+                        use_stockfish_opponent = random.random() < ratio
+                    if use_stockfish_opponent:
+                        model_plays_white = next_model_plays_white_vs_stockfish
+                        if cfg.stockfish.alternate_colors:
+                            next_model_plays_white_vs_stockfish = not next_model_plays_white_vs_stockfish
 
-                    original_epsilon = mcts.cfg.dirichlet_epsilon
+                while not board.is_game_over(claim_draw=True) and move_count < cfg.max_moves:
+                    if use_stockfish_opponent:
+                        model_turn = board.turn == chess.WHITE if model_plays_white else board.turn == chess.BLACK
+                    else:
+                        model_turn = True
+
+                    if use_stockfish_opponent and not model_turn:
+                        if opponent_engine is None or opponent_limit is None:
+                            move = random.choice(list(board.legal_moves))
+                        else:
+                            play_result = opponent_engine.play(board, opponent_limit)
+                            move = play_result.move if play_result.move is not None else random.choice(list(board.legal_moves))
+                        board.push(move)
+                        node = node.add_variation(move)
+                        move_count += 1
+                        continue
+
+                        is_opening = move_count < cfg.opening_moves
+                        search_temperature = cfg.opening_temperature if is_opening else cfg.temperature
+                        search_epsilon = cfg.opening_dirichlet_epsilon if is_opening else cfg.mcts_dirichlet_epsilon
+
+                        original_epsilon = mcts.cfg.dirichlet_epsilon
                     mcts.cfg.dirichlet_epsilon = search_epsilon
                     visit_counts_dict = mcts.search(board, add_noise=True)
                     mcts.cfg.dirichlet_epsilon = original_epsilon
@@ -634,6 +713,8 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
     finally:
         if engine is not None:
             engine.close()
+        if opponent_engine is not None:
+            opponent_engine.close()
 
 def _print_run_configuration(cfg: SelfPlayConfig) -> None:
     print("[selfplay] Configuration summary:")
@@ -660,6 +741,13 @@ def _print_run_configuration(cfg: SelfPlayConfig) -> None:
         f"  storage: dataset_base={cfg.output_dataset} manifest={cfg.output_manifest} "
         f"max_positions={cfg.max_positions}"
     )
+    if cfg.stockfish.enabled:
+        print(
+            f"  opponent: stockfish ratio={cfg.stockfish.ratio} engine={cfg.stockfish.engine_path} "
+            f"skill={cfg.stockfish.skill_level} alternate_colors={cfg.stockfish.alternate_colors}"
+        )
+    else:
+        print("  opponent: self-play")
     print(
         f"  pgn: base={cfg.output_pgn}"
     )
