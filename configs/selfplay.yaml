@@ -21,6 +21,9 @@ mcts_c_puct: 1.5
 mcts_dirichlet_alpha: 0.3
 mcts_dirichlet_epsilon: 0.05
 mcts_eval_batch_size: 256
+opening_moves: 12
+opening_temperature: 0.6
+opening_dirichlet_epsilon: 0.25
 train_after: true
 train_config: configs/train.yaml
 eval_engine_path: "/home/charizard/Downloads/stockfish-ubuntu-x86-64-avx512/stockfish/stockfish-ubuntu-x86-64-avx512"

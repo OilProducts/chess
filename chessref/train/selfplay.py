@@ -178,6 +178,9 @@ class SelfPlayConfig:
     mcts_eval_batch_size: int = 1
     inference_max_loops: int = 1
     temperature: float = 1.0
+    opening_moves: int = 12
+    opening_temperature: float = 0.6
+    opening_dirichlet_epsilon: float = 0.25
     train_after: bool = False
     train_config: Optional[str] = None
     eval_engine_path: Optional[str] = None
@@ -433,13 +436,20 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
                 mcts.reset_timing_stats()
 
                 while not board.is_game_over(claim_draw=True) and move_count < cfg.max_moves:
+                    is_opening = move_count < cfg.opening_moves
+                    search_temperature = cfg.opening_temperature if is_opening else cfg.temperature
+                    search_epsilon = cfg.opening_dirichlet_epsilon if is_opening else cfg.mcts_dirichlet_epsilon
+
+                    original_epsilon = mcts.cfg.dirichlet_epsilon
+                    mcts.cfg.dirichlet_epsilon = search_epsilon
                     visit_counts_dict = mcts.search(board, add_noise=True)
+                    mcts.cfg.dirichlet_epsilon = original_epsilon
                     visit_tensor = torch.zeros(NUM_MOVES, dtype=torch.float32)
                     for move, visits in visit_counts_dict.items():
                         idx = encode_move(move, board)
                         visit_tensor[idx] = float(visits)
 
-                    move_index = _select_move(visit_tensor, cfg.temperature)
+                    move_index = _select_move(visit_tensor, search_temperature)
                     chosen_move: Optional[chess.Move] = None
                     for move in board.legal_moves:
                         if encode_move(move, board) == move_index:
