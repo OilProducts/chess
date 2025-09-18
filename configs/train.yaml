@@ -13,7 +13,7 @@ data:
   transforms: [identity, flip_horizontal]
   target:
     type: selfplay
-    stockfish_path: "/opt/homebrew/bin/stockfish"
+    stockfish_path: "/home/charizard/Downloads/stockfish-ubuntu-x86-64-avx512/stockfish/stockfish-ubuntu-x86-64-avx512"
     depth: null
     nodes: null
     multipv: 8
