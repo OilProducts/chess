@@ -21,6 +21,13 @@ An experimental chess engine centred on iterative refinement (HRM-inspired) for 
 
 Supervised training consumes PGNs (human games, engine matches, or self-play logs) and writes checkpoints/metrics.
 
+## Config Files
+
+- `configs/train.yaml` controls the supervised trainer (`chessref.train.train_supervised`). It covers data sources, optimizer settings, logging, and device targeting for gradient updates.
+- `configs/selfplay.yaml` feeds the self-play generator (`chessref.train.selfplay`). It defines the rollout model, MCTS parameters, dataset/PGN outputs, and optional handoff into training or Stockfish evals.
+- `configs/eval.yaml` configures policy evaluation (`chessref.eval.eval_policy`). It specifies held-out PGNs, inference loop settings, and checkpoints for offline accuracy reports.
+- `configs/match.yaml` drives lightweight match play (`chessref.eval.eval_match`). It sets the opponent type, match length, inference budget, and device used for head-to-head smoke tests.
+
 ```bash
 python -m chessref.train.train_supervised --config configs/train.yaml \
   data.pgn_paths='["/path/to/train.pgn"]' \
