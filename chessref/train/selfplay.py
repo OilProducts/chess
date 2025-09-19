@@ -208,6 +208,7 @@ class SelfPlayConfig:
     eval_summary_thresholds: Optional[Dict[str, float]] = None
     max_positions: Optional[int] = None
     train_every_batches: int = 1
+    train_after_positions: Optional[int] = None
     run_forever: bool = False
     max_batches: Optional[int] = None
 
@@ -467,6 +468,8 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
     batch_index = 0
     last_pgn: Optional[Path] = None
     next_model_plays_white_vs_stockfish = cfg.stockfish.play_as_white
+    positions_since_last_train = 0
+    batches_since_last_train = 0
 
     try:
         while True:
@@ -643,6 +646,7 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
                     dataset_file = dataset_dir / f"{dataset_stem}_{unique_id}{dataset_suffix}"
                     torch.save(game_samples, dataset_file)
                     print(f"[selfplay] Saved {len(game_samples)} training samples to {dataset_file}")
+                    positions_since_last_train += len(game_samples)
 
                 opponent_summary = "stockfish" if use_stockfish_opponent else "self-play"
                 if use_stockfish_opponent:
@@ -689,13 +693,35 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
                     _save_manifest(manifest_path, manifest_entries)
                     dataset_paths = _dataset_paths_from_manifest(manifest_entries)
 
-            if cfg.train_after and games_in_batch > 0 and dataset_paths:
+            if cfg.train_after:
+                batches_since_last_train += 1
+
+            should_train = False
+            if cfg.train_after and dataset_paths:
+                min_batches = max(1, cfg.train_every_batches)
+                threshold = cfg.train_after_positions
+                if threshold is not None:
+                    if (
+                        positions_since_last_train >= threshold
+                        and batches_since_last_train >= min_batches
+                        and positions_since_last_train > 0
+                    ):
+                        should_train = True
+                else:
+                    if games_in_batch > 0 and batches_since_last_train >= min_batches:
+                        should_train = True
+
+            if should_train:
                 train_cfg_path = Path(cfg.train_config) if cfg.train_config else Path("configs/train.yaml")
                 train_cfg = load_train_config(train_cfg_path)
                 manifest_datasets = list(dict.fromkeys(dataset_paths))
                 train_cfg.data.selfplay_datasets = manifest_datasets
+                position_msg = ""
+                if cfg.train_after_positions is not None:
+                    position_msg = f" after accumulating {positions_since_last_train} new positions"
                 print(
                     f"[selfplay] Starting supervised training on {len(train_cfg.data.selfplay_datasets)} datasets (batch {batch_index + 1})"
+                    f"{position_msg}"
                 )
                 train(train_cfg)
 
@@ -715,6 +741,9 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
                         f"[selfplay] Warning: no checkpoint found in {checkpoint_dir} after training;"
                         " continuing with previous weights."
                     )
+
+                positions_since_last_train = 0
+                batches_since_last_train = 0
 
             batch_index += 1
 
@@ -774,7 +803,8 @@ def _print_run_configuration(cfg: SelfPlayConfig) -> None:
             f"  loop: run_forever=false num_games={cfg.num_games} max_batches={cfg.max_batches}"
         )
     print(
-        f"  training: train_after={cfg.train_after} train_every_batches={cfg.train_every_batches}"
+        f"  training: train_after={cfg.train_after} train_every_batches={cfg.train_every_batches} "
+        f"train_after_positions={cfg.train_after_positions}"
     )
     print(f"  checkpoint: checkpoint={cfg.checkpoint}")
 
