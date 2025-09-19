@@ -473,7 +473,6 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
             games_in_batch = 0
             for game_idx in range(cfg.num_games):
                 global_game = batch_index * cfg.num_games + game_idx + 1
-                print(f"[selfplay] Generating game {global_game} (batch {batch_index + 1})...")
                 board = chess.Board()
                 game = chess.pgn.Game()
                 node = game
@@ -497,6 +496,15 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
                         model_plays_white = next_model_plays_white_vs_stockfish
                         if cfg.stockfish.alternate_colors:
                             next_model_plays_white_vs_stockfish = not next_model_plays_white_vs_stockfish
+
+                if use_stockfish_opponent:
+                    model_color = "white" if model_plays_white else "black"
+                    opponent_label = f"stockfish (model plays {model_color})"
+                else:
+                    opponent_label = "self-play"
+                print(
+                    f"[selfplay] Generating game {global_game} (batch {batch_index + 1}) vs {opponent_label}..."
+                )
 
                 while not board.is_game_over(claim_draw=True) and move_count < cfg.max_moves:
                     if use_stockfish_opponent:
@@ -636,16 +644,22 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
                     torch.save(game_samples, dataset_file)
                     print(f"[selfplay] Saved {len(game_samples)} training samples to {dataset_file}")
 
+                opponent_summary = "stockfish" if use_stockfish_opponent else "self-play"
+                if use_stockfish_opponent:
+                    opponent_summary = (
+                        f"stockfish (model plays {'white' if model_plays_white else 'black'})"
+                    )
+
                 if game_evals:
                     summary = _summarize_stockfish_evals(game_evals, cfg.eval_summary_thresholds)
                     print(
                         f"[selfplay] Game {global_game} finished result={result} plies={move_count} "
-                        f"evaluated={len(game_evals)} {summary}{timing_suffix}"
+                        f"opponent={opponent_summary} evaluated={len(game_evals)} {summary}{timing_suffix}"
                     )
                 else:
                     print(
-                        f"[selfplay] Game {global_game} finished result={result} plies={move_count}"
-                        f"{timing_suffix}"
+                        f"[selfplay] Game {global_game} finished result={result} plies={move_count} "
+                        f"opponent={opponent_summary}{timing_suffix}"
                     )
 
                 games_in_batch += 1
