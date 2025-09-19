@@ -672,6 +672,14 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
                     opponent_summary = (
                         f"stockfish (model plays {'white' if model_plays_white else 'black'})"
                     )
+                model_win_vs_stockfish: Optional[bool] = None
+                if use_stockfish_opponent:
+                    if result == "1-0":
+                        model_win_vs_stockfish = model_plays_white
+                    elif result == "0-1":
+                        model_win_vs_stockfish = not model_plays_white
+                    else:
+                        model_win_vs_stockfish = False
 
                 if game_evals:
                     summary = _summarize_stockfish_evals(game_evals, cfg.eval_summary_thresholds)
@@ -698,6 +706,10 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
                         "result": result,
                         "timestamp": datetime.now(timezone.utc).isoformat(),
                     }
+                    if use_stockfish_opponent:
+                        entry["opponent"] = "stockfish"
+                        entry["model_color"] = "white" if model_plays_white else "black"
+                        entry["model_win_vs_stockfish"] = model_win_vs_stockfish
                     manifest_entries.append(entry)
                     manifest_signatures.add(line_hash)
                     manifest_entries = _prune_manifest(
