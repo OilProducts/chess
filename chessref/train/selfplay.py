@@ -172,6 +172,8 @@ class StockfishConfig:
     nodes: Optional[int] = None
     movetime: Optional[int] = None
     skill_level: Optional[int] = None
+    limit_strength: Optional[bool] = None
+    elo: Optional[int] = None
     play_as_white: bool = True
     alternate_colors: bool = True
 
@@ -451,6 +453,23 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
                 except chess.engine.EngineError:
                     print(
                         f"[selfplay] Warning: failed to set Stockfish skill level to {cfg.stockfish.skill_level}; using default"
+                    )
+            limit_strength: Optional[bool] = cfg.stockfish.limit_strength
+            if limit_strength is None and cfg.stockfish.elo is not None:
+                limit_strength = True
+            if limit_strength is not None:
+                try:
+                    opponent_engine.configure({"UCI_LimitStrength": bool(limit_strength)})
+                except chess.engine.EngineError:
+                    print(
+                        f"[selfplay] Warning: failed to set Stockfish limit strength to {limit_strength}; using default"
+                    )
+            if cfg.stockfish.elo is not None:
+                try:
+                    opponent_engine.configure({"UCI_Elo": cfg.stockfish.elo})
+                except chess.engine.EngineError:
+                    print(
+                        f"[selfplay] Warning: failed to set Stockfish UCI_Elo to {cfg.stockfish.elo}; using default"
                     )
             opponent_limit_kwargs: Dict[str, float | int] = {}
             if cfg.stockfish.depth is not None:
@@ -787,7 +806,8 @@ def _print_run_configuration(cfg: SelfPlayConfig) -> None:
     if cfg.stockfish.enabled:
         print(
             f"  opponent: stockfish ratio={cfg.stockfish.ratio} engine={cfg.stockfish.engine_path} "
-            f"skill={cfg.stockfish.skill_level} alternate_colors={cfg.stockfish.alternate_colors}"
+            f"skill={cfg.stockfish.skill_level} limit_strength={cfg.stockfish.limit_strength} "
+            f"elo={cfg.stockfish.elo} alternate_colors={cfg.stockfish.alternate_colors}"
         )
     else:
         print("  opponent: self-play")
