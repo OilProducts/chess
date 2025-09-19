@@ -98,23 +98,35 @@ class IterativeRefiner(nn.Module):
         num_steps: int,
         prev_policy: Optional[torch.Tensor] = None,
         detach_prev_policy: bool = True,
+        legal_mask: Optional[torch.Tensor] = None,
     ) -> RefinementOutputs:
         if prev_policy is None:
-            prev_policy = torch.full(
-                (board_planes.size(0), self.num_moves),
-                1.0 / self.num_moves,
-                dtype=board_planes.dtype,
-                device=board_planes.device,
-            )
+            if legal_mask is not None:
+                legal_cast = legal_mask.to(dtype=board_planes.dtype)
+                mass = legal_cast.sum(dim=-1, keepdim=True).clamp_min(1.0)
+                prev_policy = legal_cast / mass
+            else:
+                prev_policy = torch.full(
+                    (board_planes.size(0), self.num_moves),
+                    1.0 / self.num_moves,
+                    dtype=board_planes.dtype,
+                    device=board_planes.device,
+                )
         outputs: List[RefinementStepOutput] = []
 
         current_policy = prev_policy
         for _ in range(num_steps):
             step = self.forward_step(board_planes, current_policy)
             outputs.append(step)
-            current_policy = F.softmax(step.policy_logits, dim=-1)
+            next_policy = F.softmax(step.policy_logits, dim=-1)
+            if legal_mask is not None:
+                masked_policy = torch.where(legal_mask, next_policy, torch.zeros_like(next_policy))
+                mass = masked_policy.sum(dim=-1, keepdim=True)
+                fallback = current_policy
+                next_policy = torch.where(mass > 0, masked_policy / mass, fallback)
             if detach_prev_policy:
-                current_policy = current_policy.detach()
+                next_policy = next_policy.detach()
+            current_policy = next_policy
 
         return RefinementOutputs(steps=outputs)
 

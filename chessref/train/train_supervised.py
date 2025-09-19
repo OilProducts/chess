@@ -244,6 +244,7 @@ def train(cfg: TrainConfig) -> TrainSummary:
                     planes,
                     num_steps=cfg.training.k_train,
                     detach_prev_policy=cfg.training.detach_prev_policy,
+                    legal_mask=legal_mask,
                 )
                 policy_logits = [step.policy_logits for step in outputs.steps]
                 for tensor in policy_logits:
