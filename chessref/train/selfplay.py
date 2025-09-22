@@ -499,6 +499,26 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
                 global_game = batch_index * cfg.num_games + game_idx + 1
                 attempt = 0
 
+                use_stockfish_opponent = False
+                model_plays_white = True
+                opponent_label_base = "self-play"
+                toggle_stockfish_color = False
+
+                if stockfish_enabled and opponent_engine is not None:
+                    ratio = min(max(cfg.stockfish.ratio, 0.0), 1.0)
+                    if ratio >= 1.0:
+                        use_stockfish_opponent = True
+                    elif ratio <= 0.0:
+                        use_stockfish_opponent = False
+                    else:
+                        use_stockfish_opponent = random.random() < ratio
+                    if use_stockfish_opponent:
+                        model_plays_white = next_model_plays_white_vs_stockfish
+                        opponent_label_base = (
+                            f"stockfish (model plays {'white' if model_plays_white else 'black'})"
+                        )
+                        toggle_stockfish_color = cfg.stockfish.alternate_colors
+
                 while True:
                     attempt += 1
                     board = chess.Board()
@@ -508,21 +528,6 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
                     episode_records: List[dict] = []
                     game_evals: List[StockfishEval] = []
                     mcts.reset_timing_stats()
-
-                    use_stockfish_opponent = False
-                    model_plays_white = True
-                    if stockfish_enabled and opponent_engine is not None:
-                        ratio = min(max(cfg.stockfish.ratio, 0.0), 1.0)
-                        if ratio >= 1.0:
-                            use_stockfish_opponent = True
-                        elif ratio <= 0.0:
-                            use_stockfish_opponent = False
-                        else:
-                            use_stockfish_opponent = random.random() < ratio
-                        if use_stockfish_opponent:
-                            model_plays_white = next_model_plays_white_vs_stockfish
-                            if cfg.stockfish.alternate_colors:
-                                next_model_plays_white_vs_stockfish = not next_model_plays_white_vs_stockfish
 
                     if use_stockfish_opponent:
                         model_color = "white" if model_plays_white else "black"
@@ -752,6 +757,9 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
                         }
                         _save_manifest(manifest_path, manifest_entries)
                         dataset_paths = _dataset_paths_from_manifest(manifest_entries)
+
+                    if use_stockfish_opponent and toggle_stockfish_color:
+                        next_model_plays_white_vs_stockfish = not next_model_plays_white_vs_stockfish
 
                     break
 

@@ -5,6 +5,7 @@ from typing import Dict, List
 import chess
 import chess.engine
 import torch
+import pytest
 
 from chessref.train.selfplay import SelfPlayConfig, StockfishConfig, generate_selfplay_games
 from chessref.train.train_supervised import (
@@ -198,6 +199,110 @@ def test_generate_selfplay_games_replays_max_move_cap(monkeypatch, tmp_path: Pat
     manifest_entries = _load_manifest(manifest_path)
     assert len(manifest_entries) == 1
     assert manifest_entries[0]["result"] == "1-0"
+
+    saved_datasets = list(Path(dataset_dir).glob("*.pt"))
+    assert len(saved_datasets) == 1
+    saved_pgns = list(Path(output).glob("*.pgn")) if output.suffix == "" else [Path(output)]
+    assert len(saved_pgns) == 1
+
+
+
+def test_selfplay_retry_keeps_opponent(monkeypatch, tmp_path: Path) -> None:
+    random_calls: List[int] = []
+    random_values = iter([0.7, 0.2])
+
+    def fake_random() -> float:
+        try:
+            value = next(random_values)
+        except StopIteration:  # pragma: no cover - signals unexpected reuse
+            pytest.fail("random.random called more than expected during retry")
+        random_calls.append(1)
+        return value
+
+    monkeypatch.setattr("random.random", fake_random)
+
+    class RetryBoard:
+        attempts = 0
+
+        def __init__(self, fen: str | None = None) -> None:
+            type(self).attempts += 1
+            self.attempt_id = type(self).attempts
+            self._fen = chess.STARTING_BOARD_FEN if fen is None else fen
+            self.turn = chess.WHITE
+
+        def is_game_over(self, claim_draw: bool = False) -> bool:
+            return self.attempt_id > 1
+
+        def result(self, claim_draw: bool = False) -> str:
+            return "*" if self.attempt_id == 1 else "1-0"
+
+        def fen(self) -> str:  # type: ignore[override]
+            return self._fen
+
+        def legal_moves(self):  # pragma: no cover - loop never inspects
+            return []
+
+        def push(self, move) -> None:  # pragma: no cover - should not be called
+            raise AssertionError("push should not be invoked in RetryBoard")
+
+        def copy(self, stack: bool = False):  # pragma: no cover - unused
+            return self
+
+    class FakeEngine:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def configure(self, _options: Dict[str, int | bool]) -> None:
+            return None
+
+        def play(self, board: chess.Board, limit) -> chess.engine.PlayResult:  # pragma: no cover - should not run
+            raise AssertionError("Stockfish engine should not be invoked during self-play retries")
+
+        def close(self) -> None:
+            self.closed = True
+
+    monkeypatch.setattr("chess.engine.SimpleEngine.popen_uci", lambda path: FakeEngine())
+    monkeypatch.setattr("chess.Board", RetryBoard)
+
+    output = tmp_path / "retry_pgn"
+    dataset_dir = tmp_path / "retry_data"
+    manifest_path = tmp_path / "retry_manifest.json"
+    cfg = SelfPlayConfig(
+        model=ModelConfig(num_moves=4672, d_model=32, nhead=4, depth=1, dim_feedforward=64, dropout=0.0, use_act=False),
+        checkpoint=None,
+        num_games=1,
+        max_moves=0,
+        output_pgn=str(output),
+        output_dataset=str(dataset_dir),
+        output_manifest=str(manifest_path),
+        device="cpu",
+        inference_max_loops=1,
+        temperature=1.0,
+        mcts_num_simulations=4,
+        save_draws=True,
+        stockfish=StockfishConfig(
+            enabled=True,
+            ratio=0.5,
+            engine_path="fake",
+            depth=1,
+            play_as_white=True,
+            alternate_colors=True,
+        ),
+        train_after=False,
+        train_every_batches=1,
+        run_forever=False,
+        max_batches=None,
+    )
+
+    generate_selfplay_games(cfg)
+
+    assert RetryBoard.attempts >= 2
+    assert len(random_calls) == 1
+
+    manifest_entries = _load_manifest(manifest_path)
+    assert len(manifest_entries) == 1
+    entry = manifest_entries[0]
+    assert entry.get("opponent") is None
 
     saved_datasets = list(Path(dataset_dir).glob("*.pt"))
     assert len(saved_datasets) == 1
