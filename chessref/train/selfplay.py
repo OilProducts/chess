@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
@@ -31,7 +31,7 @@ from chessref.train.train_supervised import (
     train,
     _select_device,
 )
-from chessref.utils.checkpoint import load_checkpoint
+from chessref.utils.checkpoint import load_checkpoint, save_checkpoint
 
 
 def _score_to_cp(score: chess.engine.Score, mate_value: int = 10000) -> float:
@@ -199,6 +199,8 @@ class SelfPlayConfig:
     opening_temperature: float = 0.6
     opening_dirichlet_epsilon: float = 0.25
     save_draws: bool = True
+    selfplay_use_previous_checkpoint: bool = False
+    selfplay_alternate_colors: bool = True
     stockfish: StockfishConfig = field(default_factory=StockfishConfig)
     train_after: bool = False
     train_config: Optional[str] = None
@@ -375,6 +377,29 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
         device=device,
     )
 
+    train_cfg_path = Path(cfg.train_config) if cfg.train_config else Path("configs/train.yaml")
+    base_train_cfg = load_train_config(train_cfg_path)
+    checkpoint_dir = Path(base_train_cfg.checkpoint.directory)
+    opponent_snapshot_path = checkpoint_dir / "selfplay_opponent_latest.pt"
+
+    selfplay_opponent_model: Optional[IterativeRefiner] = None
+    selfplay_opponent_mcts: Optional[MCTS] = None
+    next_model_plays_white_vs_self = True
+
+    if cfg.selfplay_use_previous_checkpoint and opponent_snapshot_path.exists():
+        try:
+            opponent_model = _build_model(base_train_cfg.model, device)
+            snapshot = load_checkpoint(opponent_snapshot_path, map_location=device)
+            opponent_state = snapshot.get("model", snapshot)
+            opponent_model.load_state_dict(opponent_state)
+            opponent_model.eval()
+            selfplay_opponent_model = opponent_model
+            selfplay_opponent_mcts = MCTS(opponent_model, replace(mcts.cfg), device=device)
+            print(f"[selfplay] Loaded previous self-play opponent from {opponent_snapshot_path}")
+        except Exception as exc:  # pragma: no cover - defensive
+            print(f"[selfplay] Warning: failed to load opponent checkpoint {opponent_snapshot_path}: {exc}")
+
+
     pgn_base_path = Path(cfg.output_pgn)
     if pgn_base_path.suffix:
         pgn_dir = pgn_base_path.parent
@@ -519,6 +544,20 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
                         )
                         toggle_stockfish_color = cfg.stockfish.alternate_colors
 
+                selfplay_uses_previous_for_game = (
+                    not use_stockfish_opponent
+                    and cfg.selfplay_use_previous_checkpoint
+                    and selfplay_opponent_model is not None
+                    and selfplay_opponent_mcts is not None
+                )
+                model_plays_white_self = (
+                    next_model_plays_white_vs_self if selfplay_uses_previous_for_game else True
+                )
+                if selfplay_uses_previous_for_game:
+                    opponent_label_base = (
+                        f"self-play(prev model plays {'white' if model_plays_white_self else 'black'})"
+                    )
+
                 while True:
                     attempt += 1
                     board = chess.Board()
@@ -528,42 +567,53 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
                     episode_records: List[dict] = []
                     game_evals: List[StockfishEval] = []
                     mcts.reset_timing_stats()
+                    if selfplay_uses_previous_for_game and selfplay_opponent_mcts is not None:
+                        selfplay_opponent_mcts.reset_timing_stats()
 
-                    if use_stockfish_opponent:
-                        model_color = "white" if model_plays_white else "black"
-                        opponent_label = f"stockfish (model plays {model_color})"
-                    else:
-                        opponent_label = "self-play"
                     attempt_suffix = f" attempt={attempt}" if attempt > 1 else ""
                     print(
-                        f"[selfplay] Generating game {global_game} (batch {batch_index + 1}) vs {opponent_label}{attempt_suffix}..."
+                        f"[selfplay] Generating game {global_game} (batch {batch_index + 1}) "
+                        f"vs {opponent_label_base}{attempt_suffix}..."
                     )
 
                     while not board.is_game_over(claim_draw=True) and move_count < cfg.max_moves:
+                        record_move = True
+                        active_mcts = mcts
+
                         if use_stockfish_opponent:
                             model_turn = board.turn == chess.WHITE if model_plays_white else board.turn == chess.BLACK
-                        else:
-                            model_turn = True
-
-                        if use_stockfish_opponent and not model_turn:
-                            if opponent_engine is None or opponent_limit is None:
-                                move = random.choice(list(board.legal_moves))
+                            if not model_turn:
+                                if opponent_engine is None or opponent_limit is None:
+                                    move = random.choice(list(board.legal_moves))
+                                else:
+                                    play_result = opponent_engine.play(board, opponent_limit)
+                                    move = play_result.move if play_result.move is not None else random.choice(list(board.legal_moves))
+                                board.push(move)
+                                node = node.add_variation(move)
+                                move_count += 1
+                                continue
+                        elif selfplay_uses_previous_for_game:
+                            model_turn = board.turn == (chess.WHITE if model_plays_white_self else chess.BLACK)
+                            if model_turn:
+                                active_mcts = mcts
+                                record_move = True
                             else:
-                                play_result = opponent_engine.play(board, opponent_limit)
-                                move = play_result.move if play_result.move is not None else random.choice(list(board.legal_moves))
-                            board.push(move)
-                            node = node.add_variation(move)
-                            move_count += 1
-                            continue
+                                if selfplay_opponent_mcts is None:
+                                    raise RuntimeError("self-play opponent MCTS unavailable")
+                                active_mcts = selfplay_opponent_mcts
+                                record_move = False
+                        else:
+                            active_mcts = mcts
+                            record_move = True
 
                         is_opening = move_count < cfg.opening_moves
                         search_temperature = cfg.opening_temperature if is_opening else cfg.temperature
                         search_epsilon = cfg.opening_dirichlet_epsilon if is_opening else cfg.mcts_dirichlet_epsilon
 
-                        original_epsilon = mcts.cfg.dirichlet_epsilon
-                        mcts.cfg.dirichlet_epsilon = search_epsilon
-                        visit_counts_dict = mcts.search(board, add_noise=True)
-                        mcts.cfg.dirichlet_epsilon = original_epsilon
+                        original_epsilon = active_mcts.cfg.dirichlet_epsilon
+                        active_mcts.cfg.dirichlet_epsilon = search_epsilon
+                        visit_counts_dict = active_mcts.search(board, add_noise=True)
+                        active_mcts.cfg.dirichlet_epsilon = original_epsilon
                         visit_tensor = torch.zeros(NUM_MOVES, dtype=torch.float32)
                         for move, visits in visit_counts_dict.items():
                             idx = encode_move(move, board)
@@ -582,7 +632,7 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
                             )
                             chosen_move = max(visit_counts_dict.items(), key=lambda item: item[1])[0]
 
-                        if engine is not None and limit is not None:
+                        if record_move and engine is not None and limit is not None:
                             eval_result = _evaluate_stockfish_move(
                                 engine,
                                 limit,
@@ -599,16 +649,17 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
                                     f"cp_loss={eval_result.cp_loss:.1f}"
                                 )
 
-                        episode_records.append(
-                            {
-                                "fen": board.fen(),
-                                "policy": visit_tensor.clone(),
-                                "move": chosen_move.uci(),
-                                "game_index": global_game,
-                                "ply": move_count,
-                                "turn": board.turn,
-                            }
-                        )
+                        if record_move:
+                            episode_records.append(
+                                {
+                                    "fen": board.fen(),
+                                    "policy": visit_tensor.clone(),
+                                    "move": chosen_move.uci(),
+                                    "game_index": global_game,
+                                    "ply": move_count,
+                                    "turn": board.turn,
+                                }
+                            )
 
                         board.push(chosen_move)
                         node = node.add_variation(chosen_move)
@@ -617,7 +668,6 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
                     result = board.result(claim_draw=True)
                     game.headers["Result"] = result
                     timing_summary = mcts.pop_timing_summary()
-                    timing_suffix = ""
                     if timing_summary is not None:
                         timing_suffix = (
                             f" mcts_batches={timing_summary.batches}"
@@ -625,12 +675,19 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
                             f" mcts_avg_batch_ms={timing_summary.avg_batch_ms:.2f}"
                             f" mcts_avg_pos_ms={timing_summary.avg_position_ms:.3f}"
                         )
+                    else:
+                        timing_suffix = ""
 
-                    opponent_summary = "stockfish" if use_stockfish_opponent else "self-play"
                     if use_stockfish_opponent:
                         opponent_summary = (
                             f"stockfish (model plays {'white' if model_plays_white else 'black'})"
                         )
+                    elif selfplay_uses_previous_for_game:
+                        opponent_summary = (
+                            f"self-play(prev model plays {'white' if model_plays_white_self else 'black'})"
+                        )
+                    else:
+                        opponent_summary = "self-play"
 
                     if game_evals:
                         summary = _summarize_stockfish_evals(game_evals, cfg.eval_summary_thresholds)
@@ -744,6 +801,9 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
                             entry["opponent"] = "stockfish"
                             entry["model_color"] = "white" if model_plays_white else "black"
                             entry["model_win_vs_stockfish"] = model_win_vs_stockfish
+                        elif selfplay_uses_previous_for_game:
+                            entry["opponent"] = "selfplay_previous"
+                            entry["model_color"] = "white" if model_plays_white_self else "black"
                         manifest_entries.append(entry)
                         manifest_signatures.add(line_hash)
                         manifest_entries = _prune_manifest(
@@ -760,11 +820,12 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
 
                     if use_stockfish_opponent and toggle_stockfish_color:
                         next_model_plays_white_vs_stockfish = not next_model_plays_white_vs_stockfish
+                    if selfplay_uses_previous_for_game and cfg.selfplay_alternate_colors:
+                        next_model_plays_white_vs_self = not next_model_plays_white_vs_self
 
                     break
 
                 game_idx += 1
-
             if cfg.train_after:
                 batches_since_last_train += 1
 
@@ -795,9 +856,23 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
                     f"[selfplay] Starting supervised training on {len(train_cfg.data.selfplay_datasets)} datasets (batch {batch_index + 1})"
                     f"{position_msg}"
                 )
-                train(train_cfg)
+
+                pre_train_model = model
+                pre_train_mcts_cfg = replace(mcts.cfg)
 
                 checkpoint_dir = Path(train_cfg.checkpoint.directory)
+                checkpoint_dir.mkdir(parents=True, exist_ok=True)
+                opponent_snapshot_path = checkpoint_dir / "selfplay_opponent_latest.pt"
+                if cfg.selfplay_use_previous_checkpoint:
+                    save_checkpoint(
+                        opponent_snapshot_path,
+                        model_state=pre_train_model.state_dict(),
+                        extra={"type": "selfplay_opponent"},
+                    )
+                    print(f"[selfplay] Saved pre-training opponent snapshot to {opponent_snapshot_path}")
+
+                train(train_cfg)
+
                 latest_checkpoint = _latest_iteration_checkpoint(checkpoint_dir)
                 if latest_checkpoint is not None:
                     print(f"[selfplay] Reloading model from {latest_checkpoint}")
@@ -807,7 +882,15 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
                     reloaded_model.eval()
                     model = reloaded_model
                     cfg.model = train_cfg.model
-                    mcts.model = model
+                    mcts = MCTS(model, replace(pre_train_mcts_cfg), device=device)
+                    if cfg.selfplay_use_previous_checkpoint:
+                        selfplay_opponent_model = pre_train_model
+                        selfplay_opponent_model.eval()
+                        selfplay_opponent_mcts = MCTS(selfplay_opponent_model, replace(pre_train_mcts_cfg), device=device)
+                    else:
+                        selfplay_opponent_model = None
+                        selfplay_opponent_mcts = None
+                        next_model_plays_white_vs_self = True
                 else:
                     print(
                         f"[selfplay] Warning: no checkpoint found in {checkpoint_dir} after training;"
@@ -863,7 +946,10 @@ def _print_run_configuration(cfg: SelfPlayConfig) -> None:
             f"elo={cfg.stockfish.elo} alternate_colors={cfg.stockfish.alternate_colors}"
         )
     else:
-        print("  opponent: self-play")
+        print(
+            f"  opponent: self-play prev_checkpoint={cfg.selfplay_use_previous_checkpoint} "
+            f"alternate_colors={cfg.selfplay_alternate_colors}"
+        )
     print(
         f"  pgn: base={cfg.output_pgn} save_draws={cfg.save_draws}"
     )

@@ -7,6 +7,7 @@ import chess.engine
 import torch
 import pytest
 
+from chessref.model.refiner import IterativeRefiner
 from chessref.train.selfplay import SelfPlayConfig, StockfishConfig, generate_selfplay_games
 from chessref.train.train_supervised import (
     ModelConfig,
@@ -206,6 +207,89 @@ def test_generate_selfplay_games_replays_max_move_cap(monkeypatch, tmp_path: Pat
     assert len(saved_pgns) == 1
 
 
+
+
+
+
+def test_selfplay_uses_previous_checkpoint(monkeypatch, tmp_path: Path) -> None:
+    checkpoint_dir = tmp_path / "ckpt"
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    opponent_snapshot = checkpoint_dir / "selfplay_opponent_latest.pt"
+
+    opponent_model = IterativeRefiner(num_moves=NUM_MOVES, d_model=32, nhead=4, depth=1, dim_feedforward=64, dropout=0.0, use_act=False)
+    torch.save({"model": opponent_model.state_dict()}, opponent_snapshot)
+
+    def fake_load_config(_path: Path) -> TrainConfig:
+        data_cfg = DataConfig(
+            pgn_paths=[],
+            max_games=1,
+            transforms=["identity"],
+            target={"type": "selfplay"},
+            selfplay_datasets=[],
+            shuffle=False,
+            num_workers=0,
+            pin_memory=False,
+        )
+        optim_cfg = OptimConfig()
+        training_cfg = TrainingConfig(
+            epochs=0,
+            batch_size=1,
+            k_train=1,
+            detach_prev_policy=True,
+            act_weight=0.0,
+            value_loss="mse",
+            device="cpu",
+            log_interval=0,
+        )
+        checkpoint_cfg = CheckpointConfig(directory=str(checkpoint_dir), save_interval=0)
+        logging_cfg = LoggingConfig(enabled=False)
+        model_cfg = ModelConfig(num_moves=NUM_MOVES, d_model=32, nhead=4, depth=1, dim_feedforward=64, dropout=0.0, use_act=False)
+        return TrainConfig(
+            model=model_cfg,
+            data=data_cfg,
+            optim=optim_cfg,
+            training=training_cfg,
+            checkpoint=checkpoint_cfg,
+            logging=logging_cfg,
+        )
+
+    monkeypatch.setattr("chessref.train.selfplay.load_train_config", fake_load_config)
+
+    output = tmp_path / "pgn_prev"
+    dataset_dir = tmp_path / "data_prev"
+    manifest_path = tmp_path / "manifest_prev.json"
+    cfg = SelfPlayConfig(
+        model=ModelConfig(num_moves=NUM_MOVES, d_model=32, nhead=4, depth=1, dim_feedforward=64, dropout=0.0, use_act=False),
+        checkpoint=None,
+        num_games=1,
+        max_moves=1,
+        output_pgn=str(output),
+        output_dataset=str(dataset_dir),
+        output_manifest=str(manifest_path),
+        device="cpu",
+        inference_max_loops=1,
+        temperature=1.0,
+        mcts_num_simulations=4,
+        save_draws=True,
+        selfplay_use_previous_checkpoint=True,
+        train_after=False,
+        train_every_batches=1,
+        run_forever=False,
+        max_batches=None,
+    )
+
+    generate_selfplay_games(cfg)
+
+    manifest_entries = _load_manifest(manifest_path)
+    assert len(manifest_entries) == 1
+    entry = manifest_entries[0]
+    assert entry.get("opponent") == "selfplay_previous"
+    assert entry.get("model_color") in {"white", "black"}
+
+    saved_datasets = list(Path(dataset_dir).glob("*.pt"))
+    assert len(saved_datasets) == 1
+    saved_pgns = list(Path(output).glob("*.pgn")) if output.suffix == "" else [Path(output)]
+    assert len(saved_pgns) == 1
 
 def test_selfplay_retry_keeps_opponent(monkeypatch, tmp_path: Path) -> None:
     random_calls: List[int] = []

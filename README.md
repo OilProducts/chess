@@ -84,6 +84,8 @@ Additional knobs (see `configs/selfplay.yaml`):
 - `run_forever`/`max_batches`: continuously generate batches until interrupted (useful for automation).
 - `eval_summary_thresholds`: configure cp-loss cutoffs that will be counted in the per-game summary (e.g., mistakes/blunders).
 - `save_draws`: when `false`, self-play-only games that finish drawn are discarded and replayed until a decisive result is produced.
+- `selfplay_use_previous_checkpoint`: when `true`, self-play games pit the current model against the most recent pre-training checkpoint so draws are less frequent.
+- `selfplay_alternate_colors`: rotate colours between current and previous checkpoints each self-play game when the previous-checkpoint opponent is enabled.
 - `stockfish`: optional block that enables Stockfish as an opponent. Set `enabled`, choose a `ratio` of games to play against Stockfish, point at `engine_path`, tune depth/nodes/movetime, pick a `skill_level`, and control colour assignment with `play_as_white`/`alternate_colors`.
 
 ## Evaluation & Matches

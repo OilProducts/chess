@@ -25,6 +25,10 @@ opening_moves: 12
 opening_temperature: 1.0
 opening_dirichlet_epsilon: 0.25
 save_draws: false
+selfplay_use_previous_checkpoint: true
+selfplay_alternate_colors: true
+selfplay_use_previous_checkpoint: true
+selfplay_alternate_colors: true
 train_after: true
 train_config: configs/train.yaml
 stockfish:
