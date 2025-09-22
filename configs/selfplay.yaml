@@ -15,25 +15,27 @@ output_dataset: data/selfplay/selfplay.pt
 output_manifest: data/selfplay/manifest.json
 device: auto
 inference_max_loops: 4
-temperature: 0.1
-mcts_num_simulations: 32
+temperature: 1.0
+mcts_num_simulations: 128
 mcts_c_puct: 1.5
 mcts_dirichlet_alpha: 0.3
 mcts_dirichlet_epsilon: 0.05
 mcts_eval_batch_size: 32
 opening_moves: 12
-opening_temperature: 0.6
+opening_temperature: 1.0
 opening_dirichlet_epsilon: 0.25
+save_draws: false
 train_after: true
 train_config: configs/train.yaml
 stockfish:
   enabled: true
   ratio: 0.5
   engine_path: "/home/charizard/Downloads/stockfish-ubuntu-x86-64-avx512/stockfish/stockfish-ubuntu-x86-64-avx512"
-  depth: 2
+  depth: null
   nodes: null
-  movetime: 100
-  skill_level: null
+  movetime: 200
+  skill_level: 0
+  limit_strength: true
   play_as_white: true
   alternate_colors: true
 eval_engine_path: "/home/charizard/Downloads/stockfish-ubuntu-x86-64-avx512/stockfish/stockfish-ubuntu-x86-64-avx512"

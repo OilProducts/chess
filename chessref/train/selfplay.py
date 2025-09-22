@@ -198,6 +198,7 @@ class SelfPlayConfig:
     opening_moves: int = 12
     opening_temperature: float = 0.6
     opening_dirichlet_epsilon: float = 0.25
+    save_draws: bool = True
     stockfish: StockfishConfig = field(default_factory=StockfishConfig)
     train_after: bool = False
     train_config: Optional[str] = None
@@ -493,236 +494,268 @@ def generate_selfplay_games(cfg: SelfPlayConfig) -> Path:
     try:
         while True:
             games_in_batch = 0
-            for game_idx in range(cfg.num_games):
+            game_idx = 0
+            while game_idx < cfg.num_games:
                 global_game = batch_index * cfg.num_games + game_idx + 1
-                board = chess.Board()
-                game = chess.pgn.Game()
-                node = game
-                move_count = 0
-                episode_records: List[dict] = []
-                game_evals: List[StockfishEval] = []
-                game_samples: List[TrainingSample] = []
-                mcts.reset_timing_stats()
+                attempt = 0
 
-                use_stockfish_opponent = False
-                model_plays_white = True
-                if stockfish_enabled and opponent_engine is not None:
-                    ratio = min(max(cfg.stockfish.ratio, 0.0), 1.0)
-                    if ratio >= 1.0:
-                        use_stockfish_opponent = True
-                    elif ratio <= 0.0:
-                        use_stockfish_opponent = False
-                    else:
-                        use_stockfish_opponent = random.random() < ratio
-                    if use_stockfish_opponent:
-                        model_plays_white = next_model_plays_white_vs_stockfish
-                        if cfg.stockfish.alternate_colors:
-                            next_model_plays_white_vs_stockfish = not next_model_plays_white_vs_stockfish
+                while True:
+                    attempt += 1
+                    board = chess.Board()
+                    game = chess.pgn.Game()
+                    node = game
+                    move_count = 0
+                    episode_records: List[dict] = []
+                    game_evals: List[StockfishEval] = []
+                    mcts.reset_timing_stats()
 
-                if use_stockfish_opponent:
-                    model_color = "white" if model_plays_white else "black"
-                    opponent_label = f"stockfish (model plays {model_color})"
-                else:
-                    opponent_label = "self-play"
-                print(
-                    f"[selfplay] Generating game {global_game} (batch {batch_index + 1}) vs {opponent_label}..."
-                )
-
-                while not board.is_game_over(claim_draw=True) and move_count < cfg.max_moves:
-                    if use_stockfish_opponent:
-                        model_turn = board.turn == chess.WHITE if model_plays_white else board.turn == chess.BLACK
-                    else:
-                        model_turn = True
-
-                    if use_stockfish_opponent and not model_turn:
-                        if opponent_engine is None or opponent_limit is None:
-                            move = random.choice(list(board.legal_moves))
+                    use_stockfish_opponent = False
+                    model_plays_white = True
+                    if stockfish_enabled and opponent_engine is not None:
+                        ratio = min(max(cfg.stockfish.ratio, 0.0), 1.0)
+                        if ratio >= 1.0:
+                            use_stockfish_opponent = True
+                        elif ratio <= 0.0:
+                            use_stockfish_opponent = False
                         else:
-                            play_result = opponent_engine.play(board, opponent_limit)
-                            move = play_result.move if play_result.move is not None else random.choice(list(board.legal_moves))
-                        board.push(move)
-                        node = node.add_variation(move)
+                            use_stockfish_opponent = random.random() < ratio
+                        if use_stockfish_opponent:
+                            model_plays_white = next_model_plays_white_vs_stockfish
+                            if cfg.stockfish.alternate_colors:
+                                next_model_plays_white_vs_stockfish = not next_model_plays_white_vs_stockfish
+
+                    if use_stockfish_opponent:
+                        model_color = "white" if model_plays_white else "black"
+                        opponent_label = f"stockfish (model plays {model_color})"
+                    else:
+                        opponent_label = "self-play"
+                    attempt_suffix = f" attempt={attempt}" if attempt > 1 else ""
+                    print(
+                        f"[selfplay] Generating game {global_game} (batch {batch_index + 1}) vs {opponent_label}{attempt_suffix}..."
+                    )
+
+                    while not board.is_game_over(claim_draw=True) and move_count < cfg.max_moves:
+                        if use_stockfish_opponent:
+                            model_turn = board.turn == chess.WHITE if model_plays_white else board.turn == chess.BLACK
+                        else:
+                            model_turn = True
+
+                        if use_stockfish_opponent and not model_turn:
+                            if opponent_engine is None or opponent_limit is None:
+                                move = random.choice(list(board.legal_moves))
+                            else:
+                                play_result = opponent_engine.play(board, opponent_limit)
+                                move = play_result.move if play_result.move is not None else random.choice(list(board.legal_moves))
+                            board.push(move)
+                            node = node.add_variation(move)
+                            move_count += 1
+                            continue
+
+                        is_opening = move_count < cfg.opening_moves
+                        search_temperature = cfg.opening_temperature if is_opening else cfg.temperature
+                        search_epsilon = cfg.opening_dirichlet_epsilon if is_opening else cfg.mcts_dirichlet_epsilon
+
+                        original_epsilon = mcts.cfg.dirichlet_epsilon
+                        mcts.cfg.dirichlet_epsilon = search_epsilon
+                        visit_counts_dict = mcts.search(board, add_noise=True)
+                        mcts.cfg.dirichlet_epsilon = original_epsilon
+                        visit_tensor = torch.zeros(NUM_MOVES, dtype=torch.float32)
+                        for move, visits in visit_counts_dict.items():
+                            idx = encode_move(move, board)
+                            visit_tensor[idx] = float(visits)
+
+                        move_index = _select_move(visit_tensor, search_temperature)
+                        chosen_move: Optional[chess.Move] = None
+                        for move in board.legal_moves:
+                            if encode_move(move, board) == move_index:
+                                chosen_move = move
+                                break
+                        if chosen_move is None:
+                            print(
+                                "[selfplay] Warning: failed to map move_index to legal move; choosing "
+                                "highest-visit fallback"
+                            )
+                            chosen_move = max(visit_counts_dict.items(), key=lambda item: item[1])[0]
+
+                        if engine is not None and limit is not None:
+                            eval_result = _evaluate_stockfish_move(
+                                engine,
+                                limit,
+                                board.copy(stack=False),
+                                chosen_move,
+                                multipv,
+                            )
+                            game_evals.append(eval_result)
+                            if cfg.eval_print_moves:
+                                print(
+                                    f"[selfplay] batch={batch_index + 1} game={global_game} ply={move_count + 1} "
+                                    f"model={chosen_move.uci()} best={eval_result.best_move.uci()} "
+                                    f"model_cp={eval_result.model_cp:.1f} best_cp={eval_result.best_cp:.1f} "
+                                    f"cp_loss={eval_result.cp_loss:.1f}"
+                                )
+
+                        episode_records.append(
+                            {
+                                "fen": board.fen(),
+                                "policy": visit_tensor.clone(),
+                                "move": chosen_move.uci(),
+                                "game_index": global_game,
+                                "ply": move_count,
+                                "turn": board.turn,
+                            }
+                        )
+
+                        board.push(chosen_move)
+                        node = node.add_variation(chosen_move)
                         move_count += 1
+
+                    result = board.result(claim_draw=True)
+                    game.headers["Result"] = result
+                    timing_summary = mcts.pop_timing_summary()
+                    timing_suffix = ""
+                    if timing_summary is not None:
+                        timing_suffix = (
+                            f" mcts_batches={timing_summary.batches}"
+                            f" mcts_positions={timing_summary.positions}"
+                            f" mcts_avg_batch_ms={timing_summary.avg_batch_ms:.2f}"
+                            f" mcts_avg_pos_ms={timing_summary.avg_position_ms:.3f}"
+                        )
+
+                    opponent_summary = "stockfish" if use_stockfish_opponent else "self-play"
+                    if use_stockfish_opponent:
+                        opponent_summary = (
+                            f"stockfish (model plays {'white' if model_plays_white else 'black'})"
+                        )
+
+                    if game_evals:
+                        summary = _summarize_stockfish_evals(game_evals, cfg.eval_summary_thresholds)
+                        summary_msg = (
+                            f"[selfplay] Game {global_game} finished result={result} plies={move_count} "
+                            f"opponent={opponent_summary} evaluated={len(game_evals)} {summary}{timing_suffix}"
+                        )
+                    else:
+                        summary_msg = (
+                            f"[selfplay] Game {global_game} finished result={result} plies={move_count} "
+                            f"opponent={opponent_summary}{timing_suffix}"
+                        )
+                    print(summary_msg)
+
+                    hit_max_without_result = result == "*" and move_count >= cfg.max_moves
+                    if hit_max_without_result:
+                        print(
+                            f"[selfplay] Game {global_game} hit max_moves={cfg.max_moves} without a result; "
+                            f"replaying (attempt {attempt})."
+                        )
                         continue
 
-                    is_opening = move_count < cfg.opening_moves
-                    search_temperature = cfg.opening_temperature if is_opening else cfg.temperature
-                    search_epsilon = cfg.opening_dirichlet_epsilon if is_opening else cfg.mcts_dirichlet_epsilon
-
-                    original_epsilon = mcts.cfg.dirichlet_epsilon
-                    mcts.cfg.dirichlet_epsilon = search_epsilon
-                    visit_counts_dict = mcts.search(board, add_noise=True)
-                    mcts.cfg.dirichlet_epsilon = original_epsilon
-                    visit_tensor = torch.zeros(NUM_MOVES, dtype=torch.float32)
-                    for move, visits in visit_counts_dict.items():
-                        idx = encode_move(move, board)
-                        visit_tensor[idx] = float(visits)
-
-                    move_index = _select_move(visit_tensor, search_temperature)
-                    chosen_move: Optional[chess.Move] = None
-                    for move in board.legal_moves:
-                        if encode_move(move, board) == move_index:
-                            chosen_move = move
-                            break
-                    if chosen_move is None:
+                    skip_draw = (
+                        result == "1/2-1/2"
+                        and not cfg.save_draws
+                        and not use_stockfish_opponent
+                    )
+                    if skip_draw:
                         print(
-                        "[selfplay] Warning: failed to map move_index to legal move; choosing "
-                        "highest-visit fallback"
+                            f"[selfplay] Game {global_game} was a draw and save_draws=false; "
+                            f"replaying (attempt {attempt})."
                         )
-                        chosen_move = max(visit_counts_dict.items(), key=lambda item: item[1])[0]
+                        continue
 
-                    if engine is not None and limit is not None:
-                        eval_result = _evaluate_stockfish_move(
-                            engine,
-                            limit,
-                            board.copy(stack=False),
-                            chosen_move,
-                            multipv,
+                    game_samples: List[TrainingSample] = []
+                    for record in episode_records:
+                        value = _result_value(board, for_white=(record["turn"]))
+                        metadata = PositionRecord(
+                            fen=record["fen"],
+                            move_uci=record["move"],
+                            white_result=_result_value(board, True),
+                            ply=record["ply"],
+                            game_index=record["game_index"],
                         )
-                        game_evals.append(eval_result)
-                        if cfg.eval_print_moves:
-                            print(
-                                f"[selfplay] batch={batch_index + 1} game={global_game} ply={move_count + 1} "
-                                f"model={chosen_move.uci()} best={eval_result.best_move.uci()} "
-                                f"model_cp={eval_result.model_cp:.1f} best_cp={eval_result.best_cp:.1f} "
-                                f"cp_loss={eval_result.cp_loss:.1f}"
+                        planes = board_to_planes(chess.Board(record["fen"]))
+                        policy = record["policy"]
+                        total_visits = policy.sum()
+                        if total_visits > 0:
+                            policy = policy / total_visits
+                        game_samples.append(
+                            TrainingSample(
+                                planes=planes,
+                                policy=policy,
+                                value=torch.tensor(value, dtype=torch.float32),
+                                metadata=metadata,
                             )
-
-                    episode_records.append(
-                        {
-                            "fen": board.fen(),
-                            "policy": visit_tensor.clone(),
-                            "move": chosen_move.uci(),
-                            "game_index": global_game,
-                            "ply": move_count,
-                            "turn": board.turn,
-                        }
-                    )
-
-                    board.push(chosen_move)
-                    node = node.add_variation(chosen_move)
-                    move_count += 1
-
-                result = board.result(claim_draw=True)
-                game.headers["Result"] = result
-                timing_summary = mcts.pop_timing_summary()
-                timing_suffix = ""
-                if timing_summary is not None:
-                    timing_suffix = (
-                        f" mcts_batches={timing_summary.batches}"
-                        f" mcts_positions={timing_summary.positions}"
-                        f" mcts_avg_batch_ms={timing_summary.avg_batch_ms:.2f}"
-                        f" mcts_avg_pos_ms={timing_summary.avg_position_ms:.3f}"
-                    )
-
-                for record in episode_records:
-                    value = _result_value(board, for_white=(record["turn"]))
-                    metadata = PositionRecord(
-                        fen=record["fen"],
-                        move_uci=record["move"],
-                        white_result=_result_value(board, True),
-                        ply=record["ply"],
-                        game_index=record["game_index"],
-                    )
-                    planes = board_to_planes(chess.Board(record["fen"]))
-                    policy = record["policy"]
-                    total_visits = policy.sum()
-                    if total_visits > 0:
-                        policy = policy / total_visits
-                    game_samples.append(
-                        TrainingSample(
-                            planes=planes,
-                            policy=policy,
-                            value=torch.tensor(value, dtype=torch.float32),
-                            metadata=metadata,
                         )
-                    )
 
-                line_signature = " ".join(record["fen"] for record in episode_records)
-                line_hash = hashlib.sha1(line_signature.encode("utf-8")).hexdigest()
-                if line_hash in manifest_signatures:
-                    duplicates = [entry for entry in manifest_entries if entry.get("line_hash") == line_hash]
-                    for entry in duplicates:
-                        _remove_game_files(entry)
-                    manifest_entries = [entry for entry in manifest_entries if entry.get("line_hash") != line_hash]
-                    manifest_signatures.discard(line_hash)
-                    dataset_paths = _dataset_paths_from_manifest(manifest_entries)
-                    manifest_signatures = {
-                        entry.get("line_hash")
-                        for entry in manifest_entries
-                        if isinstance(entry.get("line_hash"), str)
-                    }
-                    _save_manifest(manifest_path, manifest_entries)
+                    line_signature = " ".join(record["fen"] for record in episode_records)
+                    line_hash = hashlib.sha1(line_signature.encode("utf-8")).hexdigest()
+                    if line_hash in manifest_signatures:
+                        duplicates = [entry for entry in manifest_entries if entry.get("line_hash") == line_hash]
+                        for entry in duplicates:
+                            _remove_game_files(entry)
+                        manifest_entries = [entry for entry in manifest_entries if entry.get("line_hash") != line_hash]
+                        manifest_signatures.discard(line_hash)
+                        dataset_paths = _dataset_paths_from_manifest(manifest_entries)
+                        manifest_signatures = {
+                            entry.get("line_hash")
+                            for entry in manifest_entries
+                            if isinstance(entry.get("line_hash"), str)
+                        }
+                        _save_manifest(manifest_path, manifest_entries)
 
-                timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
-                unique_id = f"{timestamp}_g{global_game:05d}"
-                pgn_file = pgn_dir / f"{pgn_stem}_{unique_id}{pgn_suffix}"
-                with pgn_file.open("w", encoding="utf-8") as handle:
-                    handle.write(str(game) + "\n\n")
+                    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
+                    unique_id = f"{timestamp}_g{global_game:05d}"
+                    pgn_file = pgn_dir / f"{pgn_stem}_{unique_id}{pgn_suffix}"
+                    with pgn_file.open("w", encoding="utf-8") as handle:
+                        handle.write(str(game) + "\n\n")
 
-                dataset_file: Optional[Path] = None
-                if dataset_dir is not None and dataset_stem is not None and dataset_suffix is not None:
-                    dataset_file = dataset_dir / f"{dataset_stem}_{unique_id}{dataset_suffix}"
-                    torch.save(game_samples, dataset_file)
-                    print(f"[selfplay] Saved {len(game_samples)} training samples to {dataset_file}")
-                    positions_since_last_train += len(game_samples)
+                    dataset_file: Optional[Path] = None
+                    if dataset_dir is not None and dataset_stem is not None and dataset_suffix is not None:
+                        dataset_file = dataset_dir / f"{dataset_stem}_{unique_id}{dataset_suffix}"
+                        torch.save(game_samples, dataset_file)
+                        print(f"[selfplay] Saved {len(game_samples)} training samples to {dataset_file}")
+                        positions_since_last_train += len(game_samples)
 
-                opponent_summary = "stockfish" if use_stockfish_opponent else "self-play"
-                if use_stockfish_opponent:
-                    opponent_summary = (
-                        f"stockfish (model plays {'white' if model_plays_white else 'black'})"
-                    )
-                model_win_vs_stockfish: Optional[bool] = None
-                if use_stockfish_opponent:
-                    if result == "1-0":
-                        model_win_vs_stockfish = model_plays_white
-                    elif result == "0-1":
-                        model_win_vs_stockfish = not model_plays_white
-                    else:
-                        model_win_vs_stockfish = False
-
-                if game_evals:
-                    summary = _summarize_stockfish_evals(game_evals, cfg.eval_summary_thresholds)
-                    print(
-                        f"[selfplay] Game {global_game} finished result={result} plies={move_count} "
-                        f"opponent={opponent_summary} evaluated={len(game_evals)} {summary}{timing_suffix}"
-                    )
-                else:
-                    print(
-                        f"[selfplay] Game {global_game} finished result={result} plies={move_count} "
-                        f"opponent={opponent_summary}{timing_suffix}"
-                    )
-
-                games_in_batch += 1
-                last_pgn = pgn_file
-
-                if dataset_file is not None:
-                    entry = {
-                        "dataset": str(dataset_file),
-                        "pgn": str(pgn_file),
-                        "num_samples": len(game_samples),
-                        "num_plies": move_count,
-                        "line_hash": line_hash,
-                        "result": result,
-                        "timestamp": datetime.now(timezone.utc).isoformat(),
-                    }
+                    model_win_vs_stockfish: Optional[bool] = None
                     if use_stockfish_opponent:
-                        entry["opponent"] = "stockfish"
-                        entry["model_color"] = "white" if model_plays_white else "black"
-                        entry["model_win_vs_stockfish"] = model_win_vs_stockfish
-                    manifest_entries.append(entry)
-                    manifest_signatures.add(line_hash)
-                    manifest_entries = _prune_manifest(
-                        manifest_entries,
-                        max_positions=cfg.max_positions,
-                    )
-                    manifest_signatures = {
-                        entry.get("line_hash")
-                        for entry in manifest_entries
-                        if isinstance(entry.get("line_hash"), str)
-                    }
-                    _save_manifest(manifest_path, manifest_entries)
-                    dataset_paths = _dataset_paths_from_manifest(manifest_entries)
+                        if result == "1-0":
+                            model_win_vs_stockfish = model_plays_white
+                        elif result == "0-1":
+                            model_win_vs_stockfish = not model_plays_white
+                        else:
+                            model_win_vs_stockfish = False
+
+                    games_in_batch += 1
+                    last_pgn = pgn_file
+
+                    if dataset_file is not None:
+                        entry = {
+                            "dataset": str(dataset_file),
+                            "pgn": str(pgn_file),
+                            "num_samples": len(game_samples),
+                            "num_plies": move_count,
+                            "line_hash": line_hash,
+                            "result": result,
+                            "timestamp": datetime.now(timezone.utc).isoformat(),
+                        }
+                        if use_stockfish_opponent:
+                            entry["opponent"] = "stockfish"
+                            entry["model_color"] = "white" if model_plays_white else "black"
+                            entry["model_win_vs_stockfish"] = model_win_vs_stockfish
+                        manifest_entries.append(entry)
+                        manifest_signatures.add(line_hash)
+                        manifest_entries = _prune_manifest(
+                            manifest_entries,
+                            max_positions=cfg.max_positions,
+                        )
+                        manifest_signatures = {
+                            entry.get("line_hash")
+                            for entry in manifest_entries
+                            if isinstance(entry.get("line_hash"), str)
+                        }
+                        _save_manifest(manifest_path, manifest_entries)
+                        dataset_paths = _dataset_paths_from_manifest(manifest_entries)
+
+                    break
+
+                game_idx += 1
 
             if cfg.train_after:
                 batches_since_last_train += 1
@@ -824,7 +857,7 @@ def _print_run_configuration(cfg: SelfPlayConfig) -> None:
     else:
         print("  opponent: self-play")
     print(
-        f"  pgn: base={cfg.output_pgn}"
+        f"  pgn: base={cfg.output_pgn} save_draws={cfg.save_draws}"
     )
     if cfg.run_forever:
         print(

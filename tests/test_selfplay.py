@@ -66,6 +66,144 @@ def test_generate_selfplay_games(tmp_path: Path) -> None:
     assert "line_hash" in manifest_entries[0]
 
 
+def test_generate_selfplay_games_replays_draws(monkeypatch, tmp_path: Path) -> None:
+    class FakeBoard:
+        attempts = 0
+
+        def __init__(self, fen: str | None = None) -> None:
+            type(self).attempts += 1
+            self.attempt_id = type(self).attempts
+            if fen is not None:
+                self._fen = fen
+            elif self.attempt_id == 1:
+                self._fen = chess.STARTING_BOARD_FEN
+            else:
+                self._fen = "4k3/8/8/8/8/8/8/4K3 w - - 0 1"
+            self.turn = chess.WHITE if self._fen.split()[1] == "w" else chess.BLACK
+
+        def is_game_over(self, claim_draw: bool = False) -> bool:
+            return True
+
+        def result(self, claim_draw: bool = False) -> str:
+            return "1/2-1/2" if self.attempt_id == 1 else "1-0"
+
+        def fen(self) -> str:  # type: ignore[override]
+            return self._fen
+
+        def legal_moves(self):  # pragma: no cover - loop never inspects
+            return []
+
+        def push(self, move) -> None:  # pragma: no cover - should not be called
+            raise AssertionError("push should not be invoked in FakeBoard")
+
+        def copy(self, stack: bool = False):  # pragma: no cover - unused
+            return self
+
+    monkeypatch.setattr("chess.Board", FakeBoard)
+
+    output = tmp_path / "pgn"
+    dataset_dir = tmp_path / "datasets"
+    manifest_path = tmp_path / "manifest.json"
+    cfg = SelfPlayConfig(
+        model=ModelConfig(num_moves=4672, d_model=32, nhead=4, depth=1, dim_feedforward=64, dropout=0.0, use_act=False),
+        checkpoint=None,
+        num_games=1,
+        max_moves=2,
+        output_pgn=str(output),
+        output_dataset=str(dataset_dir),
+        output_manifest=str(manifest_path),
+        device="cpu",
+        inference_max_loops=1,
+        temperature=1.0,
+        mcts_num_simulations=4,
+        save_draws=False,
+        train_after=False,
+        train_every_batches=1,
+        run_forever=False,
+        max_batches=None,
+    )
+
+    generate_selfplay_games(cfg)
+
+    # First attempt should be discarded (draw), second should be saved as a win.
+    assert FakeBoard.attempts >= 2
+
+    manifest_entries = _load_manifest(manifest_path)
+    assert len(manifest_entries) == 1
+    assert manifest_entries[0]["result"] == "1-0"
+
+    saved_datasets = list(Path(dataset_dir).glob("*.pt"))
+    assert len(saved_datasets) == 1
+    saved_pgns = list(Path(output).glob("*.pgn")) if output.suffix == "" else [Path(output)]
+    assert len(saved_pgns) == 1
+
+
+
+def test_generate_selfplay_games_replays_max_move_cap(monkeypatch, tmp_path: Path) -> None:
+    class MaxMoveBoard:
+        attempts = 0
+
+        def __init__(self, fen: str | None = None) -> None:
+            type(self).attempts += 1
+            self.attempt_id = type(self).attempts
+            self._fen = chess.STARTING_BOARD_FEN
+            self.turn = chess.WHITE
+
+        def is_game_over(self, claim_draw: bool = False) -> bool:
+            return self.attempt_id > 1
+
+        def result(self, claim_draw: bool = False) -> str:
+            return "1-0" if self.attempt_id > 1 else "*"
+
+        def fen(self) -> str:  # type: ignore[override]
+            return self._fen
+
+        def legal_moves(self):  # pragma: no cover - loop never inspects
+            return []
+
+        def push(self, move) -> None:  # pragma: no cover - should not be called
+            raise AssertionError("push should not be invoked in MaxMoveBoard")
+
+        def copy(self, stack: bool = False):  # pragma: no cover - unused
+            return self
+
+    monkeypatch.setattr("chess.Board", MaxMoveBoard)
+
+    output = tmp_path / "pgn_max"
+    dataset_dir = tmp_path / "datasets_max"
+    manifest_path = tmp_path / "manifest_max.json"
+    cfg = SelfPlayConfig(
+        model=ModelConfig(num_moves=4672, d_model=32, nhead=4, depth=1, dim_feedforward=64, dropout=0.0, use_act=False),
+        checkpoint=None,
+        num_games=1,
+        max_moves=0,
+        output_pgn=str(output),
+        output_dataset=str(dataset_dir),
+        output_manifest=str(manifest_path),
+        device="cpu",
+        inference_max_loops=1,
+        temperature=1.0,
+        mcts_num_simulations=4,
+        save_draws=True,
+        train_after=False,
+        train_every_batches=1,
+        run_forever=False,
+        max_batches=None,
+    )
+
+    generate_selfplay_games(cfg)
+
+    assert MaxMoveBoard.attempts >= 2
+
+    manifest_entries = _load_manifest(manifest_path)
+    assert len(manifest_entries) == 1
+    assert manifest_entries[0]["result"] == "1-0"
+
+    saved_datasets = list(Path(dataset_dir).glob("*.pt"))
+    assert len(saved_datasets) == 1
+    saved_pgns = list(Path(output).glob("*.pgn")) if output.suffix == "" else [Path(output)]
+    assert len(saved_pgns) == 1
+
 def test_generate_selfplay_games_triggers_training(monkeypatch, tmp_path: Path) -> None:
     train_called = {}
 
